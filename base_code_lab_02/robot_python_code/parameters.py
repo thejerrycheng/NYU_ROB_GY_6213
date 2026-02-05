@@ -2,8 +2,8 @@
 import math
 
 # UDP parameters
-localIP = "192.168.0.199" # Put your laptop computer's IP here
-arduinoIP = "192.168.0.200" # Put your arduino's IP here
+localIP = "192.168.50.195" # Put your laptop computer's IP here
+arduinoIP = "192.168.50.169" # Put your arduino's IP here
 localPort = 4010
 arduinoPort = 4010
 bufferSize = 1024
@@ -17,8 +17,8 @@ num_robot_sensors = 2 # encoder, steering
 num_robot_control_signals = 2 # speed, steering
 
 # Logging parameters
-max_num_lines_before_write = 1
-filename_start = './data/robot_data'
+max_num_lines_before_write = 50
+filename = 'robot_data.pkl'
 data_name_list = ['time', 'control_signal', 'robot_sensor_signal', 'camera_sensor_signal']
 
 # Experiment trial parameters
