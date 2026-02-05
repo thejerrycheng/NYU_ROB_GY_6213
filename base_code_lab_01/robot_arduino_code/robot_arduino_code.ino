@@ -156,15 +156,15 @@ void stop()
 }
 
 // Drive robot forward a desired speed
-void forward(int speed)
-{
-  digitalWrite(RightMotorDirPin1,LOW);
-  digitalWrite(RightMotorDirPin2,HIGH);
-  digitalWrite(LeftMotorDirPin1,HIGH);
-  digitalWrite(LeftMotorDirPin2,LOW);
-  analogWrite(LeftSpeedPin, speed * 0.75);
-  analogWrite(RightSpeedPin, speed);
-}
+// void forward(int speed)
+// {
+//   digitalWrite(RightMotorDirPin1,LOW);
+//   digitalWrite(RightMotorDirPin2,HIGH);
+//   digitalWrite(LeftMotorDirPin1,HIGH);
+//   digitalWrite(LeftMotorDirPin2,LOW);
+//   analogWrite(LeftSpeedPin, speed * 0.75);
+//   analogWrite(RightSpeedPin, speed);
+// }
 
 // Receive control signal messages from laptop, but only have delta time has passed, e.g. 10ms
 ControlSignal receive_control_signals(ControlSignal last_control_signal) {
@@ -278,9 +278,49 @@ void send_sensor_signal(SensorSignal sensor_signal)
 }
 
 // Control the robot with desired control signal from laptop
+// void control_robot(ControlSignal control_signal){
+//   // Set robot speed
+//   forward(2 * control_signal.speed);
+
+//   // Set robot steering
+//   int desired_angle = steering_angle_center + control_signal.steering_angle;
+//   myServo.write(desired_angle);
+// }
+
 void control_robot(ControlSignal control_signal){
-  // Set robot speed
-  forward(2 * control_signal.speed);
+  
+  int speed_pwm = control_signal.speed * 2; // Keep your existing scaling
+  
+  // --- REVERSE LOGIC ---
+  if (speed_pwm < 0) {
+    // Make speed positive for the PWM signal (PWM cannot be negative)
+    speed_pwm = -speed_pwm; 
+
+    // Set Right Motor to REVERSE (Flip the High/Low from your forward code)
+    digitalWrite(RightMotorDirPin1, HIGH);
+    digitalWrite(RightMotorDirPin2, LOW);
+
+    // Set Left Motor to REVERSE (Flip the High/Low from your forward code)
+    digitalWrite(LeftMotorDirPin1, LOW);
+    digitalWrite(LeftMotorDirPin2, HIGH);
+  }
+  // --- FORWARD LOGIC ---
+  else {
+    // Set Right Motor to FORWARD
+    digitalWrite(RightMotorDirPin1, LOW);
+    digitalWrite(RightMotorDirPin2, HIGH);
+
+    // Set Left Motor to FORWARD
+    digitalWrite(LeftMotorDirPin1, HIGH);
+    digitalWrite(LeftMotorDirPin2, LOW);
+  }
+
+  // Write the absolute speed (must be 0-255)
+  // Ensure we don't exceed max PWM limit
+  if (speed_pwm > 255) speed_pwm = 255;
+
+  analogWrite(LeftSpeedPin, speed_pwm * 0.75); // Keep your 0.75 calibration
+  analogWrite(RightSpeedPin, speed_pwm);
 
   // Set robot steering
   int desired_angle = steering_angle_center + control_signal.steering_angle;

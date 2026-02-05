@@ -41,9 +41,22 @@ class MyMotionModel:
         self.last_encoder_count = last_encoder_count
 
     # This is the key step of your motion model, which implements x_t = f(x_{t-1}, u_t)
+    
     def step_update(self, encoder_counts, steering_angle_command, delta_t):
-        # Add student code here
-        
+        # Here we implement a simple deterministic motion model.
+        # Add zero-mean Gaussian noise to distance and rotational velocity
+        current_dist = distance_travelled_s(encoder_counts - self.last_encoder_count)
+        dist_noise = random.gauss(0, math.sqrt(variance_distance_travelled_s(current_dist)))
+        rot_vel = rotational_velocity_w(steering_angle_command)
+        rot_noise = random.gauss(0, math.sqrt(variance_rotational_velocity_w(current_dist)))
+        current_dist = distance_travelled_s(encoder_counts - self.last_encoder_count)
+        vel = current_dist / delta_t
+        rot_vel = rotational_velocity_w(steering_angle_command)
+        self.state += [vel * math.cos(self.state[2]) * delta_t,
+                       vel * math.sin(self.state[2]) * delta_t,
+                       rot_vel * delta_t]
+        self.last_encoder_count = encoder_counts
+
         return self.state
     
     # This is a great tool to take in data from a trial and iterate over the data to create 
