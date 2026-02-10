@@ -2,8 +2,8 @@
 import math
 
 # UDP parameters
-localIP = "192.168.50.195" # Put your laptop computer's IP here
-arduinoIP = "192.168.50.169" # Put your arduino's IP here
+localIP = "192.168.1.189" # Put your laptop computer's IP here
+arduinoIP = "192.168.1.206" # Put your arduino's IP here
 localPort = 4010
 arduinoPort = 4010
 bufferSize = 1024

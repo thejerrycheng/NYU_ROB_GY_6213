@@ -267,7 +267,7 @@ def main():
                         speed_switch = ui.switch(on_change=lambda: enable_speed()).props('color=blue dense')
                     
                     # Custom styled slider
-                    slider_speed = ui.slider(min=0, max=100, value=0).props('label-always color=blue track-size=6px thumb-size=20px').classes('mt-4')
+                    slider_speed = ui.slider(min=-100, max=100, value=0).props('label-always color=blue track-size=6px thumb-size=20px').classes('mt-4')
                     ui.label('Throttle %').classes('text-xs text-slate-500 mt-1 self-end')
 
                 # Steering Control Section

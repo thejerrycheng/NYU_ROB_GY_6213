@@ -277,12 +277,43 @@ void send_sensor_signal(SensorSignal sensor_signal)
   }
 }
 
-// Control the robot with desired control signal from laptop
-void control_robot(ControlSignal control_signal){
-  // Set robot speed
-  forward(2 * control_signal.speed);
+void control_robot(ControlSignal control_signal) {
+  int speed_pwm = control_signal.speed * 2; // Scaling factor
+  
+  // --- REVERSE LOGIC ---
+  if (speed_pwm < 0) {
+    speed_pwm = abs(speed_pwm); // PWM must be a positive value (0-255)
 
-  // Set robot steering
+    // Set Right Motor to REVERSE
+    digitalWrite(RightMotorDirPin1, HIGH);
+    digitalWrite(RightMotorDirPin2, LOW);
+
+    // Set Left Motor to REVERSE
+    digitalWrite(LeftMotorDirPin1, LOW);
+    digitalWrite(LeftMotorDirPin2, HIGH);
+  }
+  // --- FORWARD LOGIC ---
+  else if (speed_pwm > 0) {
+    // Set Right Motor to FORWARD
+    digitalWrite(RightMotorDirPin1, LOW);
+    digitalWrite(RightMotorDirPin2, HIGH);
+
+    // Set Left Motor to FORWARD
+    digitalWrite(LeftMotorDirPin1, HIGH);
+    digitalWrite(LeftMotorDirPin2, LOW);
+  }
+  // --- STOP LOGIC ---
+  else {
+    stop();
+  }
+
+  // Constrain PWM to valid range
+  if (speed_pwm > 255) speed_pwm = 255;
+
+  analogWrite(LeftSpeedPin, speed_pwm * 0.75); // Calibration for motor bias
+  analogWrite(RightSpeedPin, speed_pwm);
+
+  // Set robot steering (center + offset)
   int desired_angle = steering_angle_center + control_signal.steering_angle;
   myServo.write(desired_angle);
 }

@@ -208,7 +208,7 @@ def main():
             with ui.card().classes('w-full items-center'):
                 ui.label('SPEED:').style('text-align: center;')
             with ui.card().classes('w-full items-center'):
-                slider_speed = ui.slider(min=0, max=100, value=0)
+                slider_speed = ui.slider(min=-100, max=100, value=0)
             with ui.card().classes('w-full items-center'):
                 ui.label().bind_text_from(slider_speed, 'value').style('text-align: center;')
             with ui.card().classes('w-full items-center'):
