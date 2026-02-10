@@ -7,7 +7,7 @@
 #define NoSignalDeltaTimeInMs 2000 // Number ms between message receives from laptop before stopping robot
 char ssid[] = "Tenda_9C90E0";      // REPLACE with your team's router ssid
 char pass[] = "78972629";        // REPLACE with your team's router password"78972629"
-char remoteIP[] = "192.168.0.199"; // REPLACE with your laptop's IP address on your team's router
+char remoteIP[] = "192.168.1.189"; // REPLACE with your laptop's IP address on your team's router
 unsigned int localPort = 4010;     // local port to listen on - no need to change
 unsigned int remotePort = 4010;    // local port to listen on - no need to change
 int status = WL_IDLE_STATUS;
