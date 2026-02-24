@@ -108,8 +108,8 @@ def live_calibrate_camera(rows, cols, square_size, camera_index=0):
 
 if __name__ == "__main__":
     # USER CONFIGURATION
-    CHESSBOARD_COLS = 9 
-    CHESSBOARD_ROWS = 6 
+    CHESSBOARD_COLS = 10
+    CHESSBOARD_ROWS = 7
     SQUARE_SIZE_METERS = 0.025 
     CAMERA_ID = 0
 
