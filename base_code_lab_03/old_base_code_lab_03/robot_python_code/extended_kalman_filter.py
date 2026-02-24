@@ -8,89 +8,39 @@ from matplotlib.patches import Ellipse
 import parameters
 import data_handling
 
-# --- Calibrated Constants from Motion Model ---
-L = 0.145
-KE_VALUE = 0.0001345210
-V_M = 0.004808
-V_C = -0.045557
-VAR_V = 0.00057829
-DELTA_COEFFS = [0.000027, 0.007798, 0.029847]
-VAR_DELTA = 0.00023134
-
 # Main class
 class ExtendedKalmanFilter:
     def __init__(self, x_0, Sigma_0, encoder_counts_0):
-        self.state_mean = np.array(x_0, dtype=float)
-        self.state_covariance = np.array(Sigma_0, dtype=float)
-        self.predicted_state_mean = np.zeros(3)
-        self.predicted_state_covariance = np.eye(3)
+        self.state_mean = x_0
+        self.state_covariance = Sigma_0
+        self.predicted_state_mean = [0,0,0]
+        self.predicted_state_covariance = parameters.I3 * 1.0
         self.last_encoder_counts = encoder_counts_0
-
-    def normalize_angle(self, angle):
-        return (angle + math.pi) % (2 * math.pi) - math.pi
 
     # Call the prediction and correction steps
     def update(self, u_t, z_t, delta_t):
-        self.prediction_step(u_t, delta_t)
-        
-        # Correct only if measurement is valid
-        if z_t is not None and not np.isnan(z_t).any() and not np.allclose(z_t, [0.0, 0.0, 0.0]):
-            self.correction_step(z_t)
-        else:
-            self.state_mean = self.predicted_state_mean
-            self.state_covariance = self.predicted_state_covariance
+        return
 
     # Set the EKF's predicted state mean and covariance matrix
     def prediction_step(self, u_t, delta_t):
-        s = self.distance_travelled_s(u_t[0])
-        
-        x_t, _ = self.g_function(self.state_mean, u_t, delta_t)
-        
-        G_x = self.get_G_x(self.state_mean, s)
-        R_t = self.get_R(s)
-        
-        self.predicted_state_mean = x_t
-        self.predicted_state_covariance = G_x @ self.state_covariance @ G_x.T + R_t
-        self.last_encoder_counts = u_t[0]
+        return
 
     # Set the EKF's corrected state mean and covariance matrix
     def correction_step(self, z_t):
-        H = self.get_H()
-        Q = self.get_Q()
-        
-        z_pred = self.get_h_function(self.predicted_state_mean)
-        y_t = z_t - z_pred
-        y_t[2] = self.normalize_angle(y_t[2])
-        
-        S_t = H @ self.predicted_state_covariance @ H.T + Q
-        K_t = self.predicted_state_covariance @ H.T @ np.linalg.inv(S_t)
-        
-        self.state_mean = self.predicted_state_mean + K_t @ y_t
-        self.state_mean[2] = self.normalize_angle(self.state_mean[2])
-        
-        I = np.eye(3)
-        self.state_covariance = (I - K_t @ H) @ self.predicted_state_covariance
+        return
 
     # Function to calculate distance from encoder counts
     def distance_travelled_s(self, encoder_counts):
-        de = encoder_counts - self.last_encoder_counts
-        return de * KE_VALUE    
+        return 0    
             
     # Function to calculate rotational velocity from steering and dist travelled or speed
     def rotational_velocity_w(self, steering_angle_command):        
-        alpha = steering_angle_command
-        return DELTA_COEFFS[0]*(alpha**2) + DELTA_COEFFS[1]*alpha + DELTA_COEFFS[2]
+        return 0
 
     # The nonlinear transition equation that provides new states from past states
     def g_function(self, x_tm1, u_t, delta_t):
-        s = self.distance_travelled_s(u_t[0])
-        delta = self.rotational_velocity_w(u_t[1])
-        
-        x_t = np.zeros(3)
-        x_t[0] = x_tm1[0] + s * math.cos(x_tm1[2])
-        x_t[1] = x_tm1[1] + s * math.sin(x_tm1[2])
-        x_t[2] = self.normalize_angle(x_tm1[2] - (s * math.tan(delta)) / L)
-        
+        x_t = x_tm1
+        s = 0
         return x_t, s
     
     # The nonlinear measurement function
@@ -98,37 +48,25 @@ class ExtendedKalmanFilter:
         return x_t
     
     # This function returns a matrix with the partial derivatives dg/dx
+    # g outputs x_t, y_t, theta_t, and we take derivatives wrt inputs x_tm1, y_tm1, theta_tm1
     def get_G_x(self, x_tm1, s):       
-        theta = x_tm1[2]
-        return np.array([
-            [1.0, 0.0, -s * math.sin(theta)],
-            [0.0, 1.0,  s * math.cos(theta)],
-            [0.0, 0.0,  1.0]
-        ])
+        return parameters.I3
 
     # This function returns a matrix with the partial derivatives dg/du
     def get_G_u(self, x_tm1, delta_t):                
-        # With R_t simplified, G_u is no longer strictly required for covariance math, 
-        # but kept structured in case you need it for external calls.
-        return np.eye(3)
+        return parameters.I3
 
     # This function returns a matrix with the partial derivatives dh_t/dx_t
     def get_H(self):
-        return np.eye(3)
+        return parameters.I3
     
     # This function returns the R_t matrix which contains transition function covariance terms.
     def get_R(self, s):
-        # Directly applying the provided process noise variances
-        return np.diag([VAR_V, VAR_V, VAR_DELTA])
+        return parameters.I3
 
     # This function returns the Q_t matrix which contains measurement covariance terms.
     def get_Q(self):
-        # Empirical values from the 5 location calibration
-        var_x = 0.000350     
-        var_y = 0.000320     
-        var_theta = 0.00000770  
-        return np.diag([var_x, var_y, var_theta])
-
+        return parameters.I3
 
 class KalmanFilterPlot:
 
@@ -170,7 +108,7 @@ def offline_efk():
 
     # Instantiate PF with no initial guess
     x_0 = [ekf_data[0][3][0]+.5, ekf_data[0][3][1], ekf_data[0][3][5]]
-    Sigma_0 = np.eye(3) * 1.0
+    Sigma_0 = parameters.I3
     encoder_counts_0 = ekf_data[0][2].encoder_counts
     extended_kalman_filter = ExtendedKalmanFilter(x_0, Sigma_0, encoder_counts_0)
 
@@ -181,16 +119,13 @@ def offline_efk():
     for t in range(1, len(ekf_data)):
         row = ekf_data[t]
         delta_t = ekf_data[t][0] - ekf_data[t-1][0] # time step size
-        
-        if delta_t <= 0:
-            continue
-            
         u_t = np.array([row[2].encoder_counts, row[2].steering]) # robot_sensor_signal
         z_t = np.array([row[3][0],row[3][1],row[3][5]]) # camera_sensor_signal
 
         # Run the EKF for a time step
         extended_kalman_filter.update(u_t, z_t, delta_t)
         kalman_filter_plot.update(extended_kalman_filter.state_mean, extended_kalman_filter.state_covariance[0:2,0:2])
+
 
 ####### MAIN #######
 if False:
