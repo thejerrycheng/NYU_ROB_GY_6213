@@ -126,7 +126,7 @@ def run_error_analysis():
     plt.subplots_adjust(hspace=0.15)
     plt.tight_layout(pad=0.2)
     
-    plt.savefig('error_evolution_compact.pdf')
+    plt.savefig('error_propagation_compact.pdf')
     plt.show()
 
 if __name__ == "__main__":
