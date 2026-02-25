@@ -13,6 +13,7 @@ from time import strftime
 import parameters
 import extended_kalman_filter
 import robot_python_code
+import robot
 
 # The core robot class
 class Robot:

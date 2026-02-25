@@ -17,7 +17,6 @@ VAR_V = 0.00057829
 DELTA_COEFFS = [0.000027, 0.007798, 0.029847]
 VAR_DELTA = 0.00023134
 
-# Main class
 class ExtendedKalmanFilter:
     def __init__(self, x_0, Sigma_0, encoder_counts_0):
         self.state_mean = np.array(x_0, dtype=float)
@@ -29,21 +28,19 @@ class ExtendedKalmanFilter:
     def normalize_angle(self, angle):
         return (angle + math.pi) % (2 * math.pi) - math.pi
 
-    # Call the prediction and correction steps
     def update(self, u_t, z_t, delta_t):
         self.prediction_step(u_t, delta_t)
         
-        # Correct only if measurement is valid
+        # Correct only if measurement is valid and non-zero
         if z_t is not None and not np.isnan(z_t).any() and not np.allclose(z_t, [0.0, 0.0, 0.0]):
             self.correction_step(z_t)
         else:
+            # If no measurement, the prediction becomes the new state
             self.state_mean = self.predicted_state_mean
             self.state_covariance = self.predicted_state_covariance
 
-    # Set the EKF's predicted state mean and covariance matrix
     def prediction_step(self, u_t, delta_t):
         s = self.distance_travelled_s(u_t[0])
-        
         x_t, _ = self.g_function(self.state_mean, u_t, delta_t)
         
         G_x = self.get_G_x(self.state_mean, s)
@@ -53,10 +50,9 @@ class ExtendedKalmanFilter:
         self.predicted_state_covariance = G_x @ self.state_covariance @ G_x.T + R_t
         self.last_encoder_counts = u_t[0]
 
-    # Set the EKF's corrected state mean and covariance matrix
     def correction_step(self, z_t):
         H = self.get_H()
-        Q = self.get_Q()
+        Q = self.get_Q() # Using your new empirical data
         
         z_pred = self.get_h_function(self.predicted_state_mean)
         y_t = z_t - z_pred
@@ -71,17 +67,14 @@ class ExtendedKalmanFilter:
         I = np.eye(3)
         self.state_covariance = (I - K_t @ H) @ self.predicted_state_covariance
 
-    # Function to calculate distance from encoder counts
     def distance_travelled_s(self, encoder_counts):
         de = encoder_counts - self.last_encoder_counts
         return de * KE_VALUE    
             
-    # Function to calculate rotational velocity from steering and dist travelled or speed
     def rotational_velocity_w(self, steering_angle_command):        
         alpha = steering_angle_command
         return DELTA_COEFFS[0]*(alpha**2) + DELTA_COEFFS[1]*alpha + DELTA_COEFFS[2]
 
-    # The nonlinear transition equation that provides new states from past states
     def g_function(self, x_tm1, u_t, delta_t):
         s = self.distance_travelled_s(u_t[0])
         delta = self.rotational_velocity_w(u_t[1])
@@ -89,15 +82,14 @@ class ExtendedKalmanFilter:
         x_t = np.zeros(3)
         x_t[0] = x_tm1[0] + s * math.cos(x_tm1[2])
         x_t[1] = x_tm1[1] + s * math.sin(x_tm1[2])
+        # Note: The sign of the steering update depends on your car's servo orientation
         x_t[2] = self.normalize_angle(x_tm1[2] - (s * math.tan(delta)) / L)
         
         return x_t, s
     
-    # The nonlinear measurement function
     def get_h_function(self, x_t):
         return x_t
     
-    # This function returns a matrix with the partial derivatives dg/dx
     def get_G_x(self, x_tm1, s):       
         theta = x_tm1[2]
         return np.array([
@@ -106,75 +98,138 @@ class ExtendedKalmanFilter:
             [0.0, 0.0,  1.0]
         ])
 
-    # This function returns a matrix with the partial derivatives dg/du
-    def get_G_u(self, x_tm1, delta_t):                
-        # With R_t simplified, G_u is no longer strictly required for covariance math, 
-        # but kept structured in case you need it for external calls.
-        return np.eye(3)
-
-    # This function returns a matrix with the partial derivatives dh_t/dx_t
     def get_H(self):
         return np.eye(3)
     
-    # This function returns the R_t matrix which contains transition function covariance terms.
     def get_R(self, s):
-        # Directly applying the provided process noise variances
-        return np.diag([VAR_V, VAR_V, VAR_DELTA])
+        # Process noise covariance R_t scales with the distance travelled
+        # This prevents covariance from exploding when the robot is stationary
+        return np.diag([VAR_V * abs(s), VAR_V * abs(s), VAR_DELTA * abs(s)])
 
-    # This function returns the Q_t matrix which contains measurement covariance terms.
     def get_Q(self):
-        # Empirical values from the 5 location calibration
-        var_x = 0.000350     
-        var_y = 0.000320     
-        var_theta = 0.00000770  
+        """
+        UPDATED: Empirical values from your External Camera Calibration.
+        """
+        var_x = 0.0036446932     
+        var_y = 0.0169607627     
+        var_theta = 0.0002150677  
         return np.diag([var_x, var_y, var_theta])
 
+# class KalmanFilterPlot:
 
+#     def __init__(self):
+#         self.dir_length = 0.1
+#         fig, ax = plt.subplots()
+#         self.ax = ax
+#         self.fig = fig
+
+#     def update(self, state_mean, state_covaraiance):
+#         plt.clf()
+
+#         # Plot covariance ellipse
+#         lambda_, v = np.linalg.eig(state_covaraiance)
+#         lambda_ = np.sqrt(lambda_)
+#         xy = (state_mean[0], state_mean[1])
+#         angle=np.rad2deg(np.arctan2(*v[:,0][::-1]))
+#         ell = Ellipse(xy, alpha=0.5, facecolor='red',width=lambda_[0], height=lambda_[1], angle = angle)
+#         ax = self.fig.gca()
+#         ax.add_artist(ell)
+        
+#         # Plot state estimate
+#         plt.plot(state_mean[0], state_mean[1],'ro')
+#         plt.plot([state_mean[0], state_mean[0]+ self.dir_length*math.cos(state_mean[2]) ], [state_mean[1], state_mean[1]+ self.dir_length*math.sin(state_mean[2]) ],'r')
+#         plt.xlabel('X(m)')
+#         plt.ylabel('Y(m)')
+#         plt.axis([-0.25, 2, -1, 1])
+#         plt.grid()
+#         plt.draw()
+#         plt.pause(0.1)
 class KalmanFilterPlot:
-
     def __init__(self):
         self.dir_length = 0.1
-        fig, ax = plt.subplots()
-        self.ax = ax
-        self.fig = fig
-
-    def update(self, state_mean, state_covaraiance):
-        plt.clf()
-
-        # Plot covariance ellipse
-        lambda_, v = np.linalg.eig(state_covaraiance)
-        lambda_ = np.sqrt(lambda_)
-        xy = (state_mean[0], state_mean[1])
-        angle=np.rad2deg(np.arctan2(*v[:,0][::-1]))
-        ell = Ellipse(xy, alpha=0.5, facecolor='red',width=lambda_[0], height=lambda_[1], angle = angle)
-        ax = self.fig.gca()
-        ax.add_artist(ell)
+        plt.ion() # Interactive mode
+        self.fig, self.ax = plt.subplots(figsize=(10, 8))
         
-        # Plot state estimate
-        plt.plot(state_mean[0], state_mean[1],'ro')
-        plt.plot([state_mean[0], state_mean[0]+ self.dir_length*math.cos(state_mean[2]) ], [state_mean[1], state_mean[1]+ self.dir_length*math.sin(state_mean[2]) ],'r')
-        plt.xlabel('X(m)')
-        plt.ylabel('Y(m)')
-        plt.axis([-0.25, 2, -1, 1])
-        plt.grid()
+        # Store histories for drawing the trajectory trails
+        self.ekf_x_hist, self.ekf_y_hist = [], []
+        self.dr_x_hist, self.dr_y_hist = [], []
+
+    def update(self, ekf_mean, ekf_cov, dr_mean, dr_cov, z_t):
+        self.ax.cla()
+
+        # Update histories
+        self.ekf_x_hist.append(ekf_mean[0])
+        self.ekf_y_hist.append(ekf_mean[1])
+        self.dr_x_hist.append(dr_mean[0])
+        self.dr_y_hist.append(dr_mean[1])
+
+        # Plot trajectory trails
+        self.ax.plot(self.dr_x_hist, self.dr_y_hist, 'k--', alpha=0.6, label='Dead Reckoning (Motion Only)')
+        self.ax.plot(self.ekf_x_hist, self.ekf_y_hist, 'b-', linewidth=2, label='EKF (Motion + Camera)')
+
+        # Plot current camera measurement if valid
+        if z_t is not None and not np.isnan(z_t).any() and not np.allclose(z_t, [0.0, 0.0, 0.0]):
+            self.ax.plot(z_t[0], z_t[1], 'gx', markersize=8, label='Raw Camera Z_t')
+
+        # Calculate and draw EKF Covariance Ellipse (3-sigma)
+        eigenvalues, eigenvectors = np.linalg.eigh(ekf_cov)
+        order = eigenvalues.argsort()[::-1]
+        eigenvalues = eigenvalues[order]
+        eigenvectors = eigenvectors[:, order]
+        
+        angle = np.degrees(np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0]))
+        width = 2 * 3.0 * np.sqrt(abs(eigenvalues[0]))
+        height = 2 * 3.0 * np.sqrt(abs(eigenvalues[1]))
+        
+        ell = Ellipse(xy=(ekf_mean[0], ekf_mean[1]), width=width, height=height, angle=angle, 
+                      alpha=0.3, facecolor='blue', label='EKF 3$\sigma$ Confidence')
+        self.ax.add_patch(ell)
+        
+        # Plot current states & headings (Dead Reckoning = Black, EKF = Blue)
+        self.ax.plot(dr_mean[0], dr_mean[1], 'ko')
+        self.ax.plot([dr_mean[0], dr_mean[0] + self.dir_length * math.cos(dr_mean[2])], 
+                     [dr_mean[1], dr_mean[1] + self.dir_length * math.sin(dr_mean[2])], 'k')
+                     
+        self.ax.plot(ekf_mean[0], ekf_mean[1], 'bo')
+        self.ax.plot([ekf_mean[0], ekf_mean[0] + self.dir_length * math.cos(ekf_mean[2])], 
+                     [ekf_mean[1], ekf_mean[1] + self.dir_length * math.sin(ekf_mean[2])], 'b')
+
+        # Formatting
+        self.ax.set_xlabel('X (m)')
+        self.ax.set_ylabel('Y (m)')
+        self.ax.set_title('Live EKF Tracking vs Dead Reckoning Drift')
+        
+        # Dynamic window tracking the EKF state
+        self.ax.set_xlim(ekf_mean[0] - 1.5, ekf_mean[0] + 1.5)
+        self.ax.set_ylim(ekf_mean[1] - 1.5, ekf_mean[1] + 1.5)
+        
+        self.ax.legend(loc='upper left')
+        self.ax.grid(True)
+        self.ax.axis('equal') # Ensure circles don't look like ovals
+        
         plt.draw()
-        plt.pause(0.1)
-
-
+        plt.pause(0.01)
 # Code to run your EKF offline with a data file.
-def offline_efk():
 
+
+def offline_efk():
     # Get data to filter
     filename = './data/robot_data_68_0_06_02_26_17_12_19.pkl'
+    print(f"Loading data from {filename}...")
     ekf_data = data_handling.get_file_data_for_kf(filename)
 
-    # Instantiate PF with no initial guess
+    # Initial States
     x_0 = [ekf_data[0][3][0]+.5, ekf_data[0][3][1], ekf_data[0][3][5]]
     Sigma_0 = np.eye(3) * 1.0
     encoder_counts_0 = ekf_data[0][2].encoder_counts
-    extended_kalman_filter = ExtendedKalmanFilter(x_0, Sigma_0, encoder_counts_0)
+    
+    # Instantiate the full EKF
+    ekf = ExtendedKalmanFilter(x_0, Sigma_0, encoder_counts_0)
+    
+    # Instantiate a second filter purely for Dead Reckoning
+    dead_reckoning_filter = ExtendedKalmanFilter(x_0, Sigma_0, encoder_counts_0)
 
-    # Create plotting tool for ekf
+    # Create plotting tool
     kalman_filter_plot = KalmanFilterPlot()
 
     # Loop over sim data
@@ -186,11 +241,24 @@ def offline_efk():
             continue
             
         u_t = np.array([row[2].encoder_counts, row[2].steering]) # robot_sensor_signal
-        z_t = np.array([row[3][0],row[3][1],row[3][5]]) # camera_sensor_signal
+        z_t = np.array([row[3][0], row[3][1], row[3][5]]) # camera_sensor_signal
 
-        # Run the EKF for a time step
-        extended_kalman_filter.update(u_t, z_t, delta_t)
-        kalman_filter_plot.update(extended_kalman_filter.state_mean, extended_kalman_filter.state_covariance[0:2,0:2])
+        # Run the full EKF with camera measurements
+        ekf.update(u_t, z_t, delta_t)
+        
+        # Run the Dead Reckoning filter explicitly passing 'None' for camera data
+        dead_reckoning_filter.update(u_t, None, delta_t)
+
+        # Update the visualizer with both states
+        kalman_filter_plot.update(
+            ekf.state_mean, ekf.state_covariance[0:2, 0:2],
+            dead_reckoning_filter.state_mean, dead_reckoning_filter.state_covariance[0:2, 0:2],
+            z_t
+        )
+        
+    # Prevent the plot from immediately closing when the loop finishes
+    plt.ioff()
+    plt.show()
 
 ####### MAIN #######
 if False:

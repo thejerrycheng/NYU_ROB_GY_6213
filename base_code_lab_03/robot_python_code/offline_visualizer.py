@@ -150,5 +150,5 @@ def run_visualizer(filename):
     plt.show()
 
 if __name__ == "__main__":
-    DATA_FILE = './data/robot_data_68_0_06_02_26_17_12_19.pkl'
+    DATA_FILE = './data/robot_data_0_0_24_02_26_22_02_02.pkl'
     run_visualizer(DATA_FILE)
