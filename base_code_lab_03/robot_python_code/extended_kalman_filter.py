@@ -6,7 +6,7 @@ from matplotlib.patches import Ellipse
 
 # Local libraries
 import parameters
-import data_handling
+import data_handling as data_handling_old
 
 # --- Calibrated Constants from Motion Model ---
 L = 0.145
@@ -216,7 +216,7 @@ def offline_efk():
     # Get data to filter
     filename = './data/robot_data_68_0_06_02_26_17_12_19.pkl'
     print(f"Loading data from {filename}...")
-    ekf_data = data_handling.get_file_data_for_kf(filename)
+    ekf_data = data_handling_old.get_file_data_for_kf(filename)
 
     # Initial States
     x_0 = [ekf_data[0][3][0]+.5, ekf_data[0][3][1], ekf_data[0][3][5]]

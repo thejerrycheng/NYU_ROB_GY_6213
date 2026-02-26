@@ -27,7 +27,6 @@ def convert(frame: np.ndarray) -> bytes:
 
 # Create the connection with a real camera.
 def connect_with_camera():
-    # UPDATED: Use the external camera defined in parameters.py
     video_capture = cv2.VideoCapture(parameters.camera_id)
     return video_capture
 
@@ -66,10 +65,16 @@ def main():
     # Store latest frame globally for UI streaming and recording
     latest_frame = None
     
-    # Manage video and measurement recording state entirely inside the GUI
+    # Manage video, measurement recording state, and trajectory tracking
     app_state = {
         'video_writer': None,
-        'csv_file': None
+        'csv_file': None,
+        'ekf_hist': [],   # Stores tuples of (x, y, is_occluded)
+        'dr_x': [],       # Dead Reckoning X
+        'dr_y': [],       # Dead Reckoning Y
+        'dr_theta': 0.0,
+        'last_encoder': 0,
+        'last_cam_sig': []
     }
 
     # Lidar data setup
@@ -86,15 +91,22 @@ def main():
 
     # Set up the video stream
     if stream_video:
-        # UPDATED: Use the external camera defined in parameters.py
         video_capture = cv2.VideoCapture(parameters.camera_id)
     
     @app.get('/video/frame')
     async def grab_video_frame() -> Response:
-        if latest_frame is None:
-            return Response(content=b'', media_type='image/jpeg')
-        jpeg = await run.cpu_bound(convert, latest_frame)
-        return Response(content=jpeg, media_type='image/jpeg')
+        empty_response = Response(content=b'', media_type='image/jpeg')
+        if not video_capture.isOpened():
+            return empty_response
+            
+        read_result = await run.io_bound(video_capture.read)
+        if read_result is not None:
+            ret, frame = read_result
+            if frame is None:
+                return empty_response
+            jpeg = await run.cpu_bound(convert, frame)
+            return Response(content=jpeg, media_type='image/jpeg')
+        return empty_response
 
     # Logic Functions
     def update_lidar_data():
@@ -153,11 +165,27 @@ def main():
                 status_indicator.classes('bg-red-500', remove='bg-green-500')
                 status_label.set_text('Disconnected')
     
-    def enable_speed():
-        pass
+    def enable_speed(): pass
+    def enable_steering(): pass
+
+    # Pure Kinematics for plotting the Dead Reckoning trail
+    def update_dr(enc_counts, steer_cmd, dr_x, dr_y, dr_theta, last_enc):
+        L = 0.145
+        KE_VALUE = 0.0001345210
+        DELTA_COEFFS = [0.000027, 0.007798, 0.029847]
         
-    def enable_steering():
-        pass
+        de = enc_counts - last_enc
+        s = de * KE_VALUE
+        alpha = steer_cmd
+        delta = DELTA_COEFFS[0]*(alpha**2) + DELTA_COEFFS[1]*alpha + DELTA_COEFFS[2]
+        
+        # Standard Polar Kinematics (Starts at pi/2)
+        nx = dr_x + s * math.cos(dr_theta)
+        ny = dr_y + s * math.sin(dr_theta)
+        nth = dr_theta - (s * math.tan(delta)) / L
+        nth = (nth + math.pi) % (2 * math.pi) - math.pi
+        
+        return nx, ny, nth
 
     def show_localization_plot():
         with main_plot:
@@ -173,36 +201,67 @@ def main():
             ax.spines['left'].set_color('#334155')
             ax.tick_params(axis='x', colors='#94a3b8')
             ax.tick_params(axis='y', colors='#94a3b8')
+
+            # --- PLOT DEAD RECKONING ---
+            if len(app_state['dr_x']) > 0:
+                ax.plot(app_state['dr_x'], app_state['dr_y'], color='gray', linestyle='--', linewidth=2, label='Dead Reckoning')
+
+            # --- PLOT EKF TRAJECTORY SEGMENTS ---
+            ekf_hist = app_state['ekf_hist']
+            for i in range(1, len(ekf_hist)):
+                x0, y0, occ0 = ekf_hist[i-1]
+                x1, y1, occ1 = ekf_hist[i]
+                color = '#ef4444' if occ1 else '#22c55e' # Red if Occluded, Green if Corrected
+                ax.plot([x0, x1], [y0, y1], color=color, linewidth=2)
+
+            # Dummy lines for Legend
+            ax.plot([], [], color='#22c55e', linewidth=2, label='EKF (Corrected)')
+            ax.plot([], [], color='#ef4444', linewidth=2, label='EKF (Occluded)')
             
-            # --- PLOT 1: EKF ESTIMATE (RED) ---
-            sigma = 3
-            covar_matrix = parameters.covariance_plot_scale * robot.extended_kalman_filter.state_covariance[0:2,0:2]
+            # --- PLOT CURRENT EKF STATE ---
             x_est = robot.extended_kalman_filter.state_mean[0]
             y_est = robot.extended_kalman_filter.state_mean[1]
+            theta_est = robot.extended_kalman_filter.state_mean[2]
+            
+            current_is_occluded = False
+            if len(ekf_hist) > 0:
+                current_is_occluded = ekf_hist[-1][2]
+                
+            ell_color = '#ef4444' if current_is_occluded else '#22c55e'
+            
+            sigma = 3
+            covar_matrix = parameters.covariance_plot_scale * robot.extended_kalman_filter.state_covariance[0:2,0:2]
             lambda_, v = np.linalg.eig(covar_matrix)
             lambda_ = np.sqrt(lambda_)
+            angle = np.rad2deg(np.arctan2(*v[:,0][::-1]))
             
-            ell = Ellipse(xy=(x_est, y_est), alpha=0.5, facecolor='#ef4444', width=lambda_[0], height=lambda_[1], angle=np.rad2deg(np.arctan2(*v[:,0][::-1])))
+            ell = Ellipse(xy=(x_est, y_est), alpha=0.3, facecolor=ell_color, width=lambda_[0], height=lambda_[1], angle=angle)
             ax.add_artist(ell)
-            plt.plot(x_est, y_est, 'ro', markersize=5, label='EKF Filtered')
+            
+            # Robot Heading Arrow (Standard Polar Mapping)
+            dir_length = 0.15
+            ax.plot([x_est, x_est + dir_length * math.cos(theta_est)], 
+                    [y_est, y_est + dir_length * math.sin(theta_est)], color=ell_color, linewidth=2)
+            ax.plot(x_est, y_est, 'o', color=ell_color, markersize=5)
 
-            # --- PLOT 2: RAW CAMERA MEASUREMENT (BLUE) ---
+            # --- PLOT RAW CAMERA MEASUREMENT ---
             z_x = robot.camera_sensor_signal[0]
             z_y = robot.camera_sensor_signal[1]
             
-            # Only plot if we have a non-zero measurement
-            if z_x != 0.0 or z_y != 0.0:
-                plt.plot(z_x, z_y, 'bx', markersize=6, label='Camera (Z_t)')
+            if not current_is_occluded and (z_x != 0.0 or z_y != 0.0):
+                ax.plot(z_x, z_y, 'cx', markersize=8, markeredgewidth=2, label='Camera (Z_t)')
 
-            # Add Legend
-            plt.legend(loc='upper right', facecolor='#0f172a', edgecolor='#334155', labelcolor='#94a3b8', fontsize=8)
+            # Add Clean Legend
+            handles, labels = ax.get_legend_handles_labels()
+            by_label = dict(zip(labels, handles))
+            ax.legend(by_label.values(), by_label.keys(), loc='upper left', facecolor='#0f172a', edgecolor='#334155', labelcolor='#94a3b8', fontsize=8)
 
             plt.grid(True, color='#1e293b', linestyle='--')
             
-            # Center the plot around the current position for better tracking
             plot_range = 1.0
             plt.xlim(x_est - plot_range, x_est + plot_range)
             plt.ylim(y_est - plot_range, y_est + plot_range)
+            ax.set_aspect('equal')
 
     def run_trial():
         robot.trial_start_time = get_time_in_ms()
@@ -212,25 +271,29 @@ def main():
         logging_switch.value = True
         ui.notify('Trial Started', type='info')
         
+        # Reset Histories for new trial
+        app_state['ekf_hist'].clear()
+        app_state['dr_x'].clear()
+        app_state['dr_y'].clear()
+        app_state['dr_theta'] = robot.extended_kalman_filter.state_mean[2]
+        app_state['last_encoder'] = robot.robot_sensor_signal.encoder_counts
+        app_state['last_cam_sig'] = list(robot.camera_sensor_signal)
+        
         # --- GUI RECORDING START (VIDEO & CSV) ---
         cmd_s = slider_speed.value
         cmd_st = slider_steering.value
         base_filename = parameters.filename_start + f"_{cmd_s}_{cmd_st}_" + strftime("%d_%m_%y_%H_%M_%S")
         
-        # Open CSV logger for Measurements
         csv_filename = base_filename + "_measurements.csv"
         app_state['csv_file'] = open(csv_filename, 'w')
         app_state['csv_file'].write("timestamp_ms,z_x,z_y,z_theta\n")
-        print(f"[+] GUI Started Recording Measurements: {csv_filename}")
 
-        # Open Video Writer
         if stream_video and video_capture.isOpened():
             video_filename = base_filename + ".mp4"
             width = int(video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             app_state['video_writer'] = cv2.VideoWriter(video_filename, fourcc, 10.0, (width, height))
-            print(f"[+] GUI Started Recording Video: {video_filename}")
 
     # --- UI LAYOUT ---
     with ui.header().classes(f'{HEADER_BG} shadow-md p-4 flex items-center justify-between'):
@@ -311,15 +374,14 @@ def main():
         cmd_speed, cmd_steering_angle = update_commands()
         
         if stream_video and video_capture.isOpened():
-            ret, latest_frame = await run.io_bound(video_capture.read)
+            read_result = await run.io_bound(video_capture.read)
+            if read_result is not None:
+                ret, latest_frame = read_result
 
         # --- GUI MEASUREMENT & VIDEO RECORDING TICK ---
         if logging_switch.value:
-            # Write Video Frame
             if app_state['video_writer'] is not None and latest_frame is not None:
                 app_state['video_writer'].write(latest_frame)
-            
-            # Write CSV Measurement
             if app_state['csv_file'] is not None:
                 z_x = robot.camera_sensor_signal[0]
                 z_y = robot.camera_sensor_signal[1]
@@ -331,16 +393,45 @@ def main():
             if app_state['video_writer'] is not None:
                 app_state['video_writer'].release()
                 app_state['video_writer'] = None
-                print("[-] GUI Stopped Recording Video")
-            
             if app_state['csv_file'] is not None:
                 app_state['csv_file'].close()
                 app_state['csv_file'] = None
-                print("[-] GUI Stopped Recording Measurements CSV")
 
-        # Original robot call (UNMODIFIED)
+        # Execute standard EKF math inside the Robot
         robot.control_loop(cmd_speed, cmd_steering_angle, logging_switch.value)
         
+        # --- GUI TRAJECTORY LOGIC ---
+        cam_sig = list(robot.camera_sensor_signal)
+        is_occluded = (app_state.get('last_cam_sig') == cam_sig)
+        app_state['last_cam_sig'] = cam_sig
+        
+        if logging_switch.value:
+            x_est = robot.extended_kalman_filter.state_mean[0]
+            y_est = robot.extended_kalman_filter.state_mean[1]
+            
+            # Save segment for the plot line
+            app_state['ekf_hist'].append((x_est, y_est, is_occluded))
+            
+            # Calculate Dead Reckoning path
+            if len(app_state['dr_x']) == 0:
+                app_state['dr_x'].append(x_est)
+                app_state['dr_y'].append(y_est)
+                app_state['dr_theta'] = robot.extended_kalman_filter.state_mean[2]
+            else:
+                nx, ny, nth = update_dr(
+                    robot.robot_sensor_signal.encoder_counts,
+                    cmd_steering_angle,
+                    app_state['dr_x'][-1],
+                    app_state['dr_y'][-1],
+                    app_state['dr_theta'],
+                    app_state['last_encoder']
+                )
+                app_state['dr_x'].append(nx)
+                app_state['dr_y'].append(ny)
+                app_state['dr_theta'] = nth
+                
+        app_state['last_encoder'] = robot.robot_sensor_signal.encoder_counts
+
         encoder_count_label.set_text(robot.robot_sensor_signal.encoder_counts)
         show_localization_plot() 
         

@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import socket
 from time import strftime
+import math
 
 # Local libraries
 import parameters
@@ -29,7 +30,13 @@ class Robot:
         self.data_logger = robot_python_code.DataLogger(parameters.filename_start, parameters.data_name_list)
         self.robot_sensor_signal = robot_python_code.RobotSensorSignal([0, 0, 0])
         self.camera_sensor_signal = [0,0,0,0,0,0]
-        self.extended_kalman_filter = extended_kalman_filter.ExtendedKalmanFilter(x_0 = [0,0,0], Sigma_0 = parameters.I3 * 10e12, encoder_counts_0 = 0)
+        
+        # CHANGED: Initialize EKF pointing in the +Y direction (pi/2)
+        self.extended_kalman_filter = extended_kalman_filter.ExtendedKalmanFilter(
+            x_0=[0, 0, math.pi / 2], 
+            Sigma_0=parameters.I3 * 10e12, 
+            encoder_counts_0=0
+        )
         
     # Create udp senders and receiver instances with the udp communication
     def setup_udp_connection(self, udp_communication):
@@ -71,4 +78,3 @@ class Robot:
             
         # Log the data
         self.data_logger.log(logging_switch_on, time.perf_counter(), control_signal, self.robot_sensor_signal, self.camera_sensor_signal, self.extended_kalman_filter.state_mean, self.extended_kalman_filter.state_covariance)
-

@@ -5,7 +5,7 @@ from scipy.optimize import least_squares
 import os
 
 # Local libraries
-import data_handling
+import base_code_lab_03.robot_python_code.data_handling_old as data_handling_old
 from extended_kalman_filter import ExtendedKalmanFilter
 
 # --- Constants ---
@@ -67,7 +67,7 @@ def batch_residuals(X_flat, num_steps, u_data, z_data, is_occluded, x_prior):
 
 def run_batch_optimization(filename):
     print(f"Running Full Batch Optimization vs Iterative EKF: {os.path.basename(filename)}")
-    ekf_data = data_handling.get_file_data_for_kf(filename)
+    ekf_data = data_handling_old.get_file_data_for_kf(filename)
 
     start_time = ekf_data[0][0]
     true_x0, true_y0, true_theta0 = ekf_data[0][3][0], ekf_data[0][3][1], ekf_data[0][3][5]
