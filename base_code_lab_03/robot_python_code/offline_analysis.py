@@ -6,9 +6,30 @@ import math
 import glob
 import os
 
+# --------------------------------------------------
+# IEEE / CRV Publication Settings (8pt, 300dpi)
+# --------------------------------------------------
+plt.rcParams.update({
+    'font.size': 6,
+    'axes.titlesize': 8,
+    'axes.labelsize': 7,
+    'xtick.labelsize': 6,
+    'ytick.labelsize': 6,
+    'legend.fontsize': 5,
+    'lines.linewidth': 1.0,
+    'lines.markersize': 2,
+    'figure.dpi': 300
+})
+
 # Local libraries
 import robot_python_code
 from extended_kalman_filter import ExtendedKalmanFilter
+
+# --------------------------------------------------
+# Utilities
+# --------------------------------------------------
+def normalize_angle(angle):
+    return (angle + math.pi) % (2 * math.pi) - math.pi
 
 def get_ellipse_params(covariance_matrix, scale=3.0):
     """ Returns the width, height, and angle of the covariance ellipse """
@@ -25,6 +46,9 @@ def get_ellipse_params(covariance_matrix, scale=3.0):
     
     return width, height, angle
 
+# --------------------------------------------------
+# Load Data
+# --------------------------------------------------
 def load_ekf_data_directly(filename):
     """ Parses the .pkl file directly to avoid CSV timestamp mismatches """
     data_dict = robot_python_code.DataLoader(filename).load()
@@ -60,6 +84,9 @@ def load_ekf_data_directly(filename):
         
     return ekf_data
 
+# --------------------------------------------------
+# Main Analysis
+# --------------------------------------------------
 def run_offline_analysis(filename, save_plot=False, output_dir="./results"):
     print(f"Processing: {os.path.basename(filename)}")
     
@@ -92,6 +119,13 @@ def run_offline_analysis(filename, save_plot=False, output_dir="./results"):
     covariances = []
     dr_covariances = []
     occlusion_flags = []
+    occlusion_times = []
+    
+    # Error tracking
+    err_x, err_y, err_theta = [], [], []
+    sig_x, sig_y, sig_theta = [], [], []
+    
+    last_z_t = x_0
 
     for i in range(1, len(ekf_data)):
         row = ekf_data[i]
@@ -118,6 +152,20 @@ def run_offline_analysis(filename, save_plot=False, output_dir="./results"):
         dr_y.append(dr_filter.state_mean[1])
         dr_theta.append(dr_filter.state_mean[2])
         dr_covariances.append(dr_filter.state_covariance.copy())
+        
+        # Error Calculation Logic
+        if row['z_t'] is not None:
+            last_z_t = row['z_t']
+        else:
+            occlusion_times.append(row['time'])
+            
+        err_x.append(ekf.state_mean[0] - last_z_t[0])
+        err_y.append(ekf.state_mean[1] - last_z_t[1])
+        err_theta.append(normalize_angle(ekf.state_mean[2] - last_z_t[2]))
+
+        sig_x.append(3.0 * math.sqrt(abs(ekf.state_covariance[0, 0])))
+        sig_y.append(3.0 * math.sqrt(abs(ekf.state_covariance[1, 1])))
+        sig_theta.append(3.0 * math.sqrt(abs(ekf.state_covariance[2, 2])))
 
     # ==========================
     # DYNAMIC AESTHETIC SCALING
@@ -130,79 +178,113 @@ def run_offline_analysis(filename, save_plot=False, output_dir="./results"):
     arrow_len = max_span * 0.05
 
     # ==========================
-    # PLOTTING
+    # 1. TRAJECTORY PLOT (3.5 x 3.0)
     # ==========================
-    # Set to exactly 3.5 inches wide, 3.0 inches tall
-    fig, ax = plt.subplots(figsize=(3.5, 3.0), dpi=300)
+    fig_traj, ax_traj = plt.subplots(figsize=(3.5, 3.0), dpi=300)
     
-    # 1. Dead Reckoning Trajectory (Gray Dashed)
-    ax.plot(dr_x, dr_y, color='gray', linestyle='--', linewidth=1.5, zorder=1, label='Dead Reckoning')
+    ax_traj.plot(dr_x, dr_y, color='gray', linestyle='--', linewidth=1.2, label='Dead Reckoning')
 
-    # 2. Color-Coded EKF Trajectory Segments
     for i in range(1, len(times)):
-        x_seg = [est_x[i-1], est_x[i]]
-        y_seg = [est_y[i-1], est_y[i]]
         color = 'red' if occlusion_flags[i] else 'green'
-        ax.plot(x_seg, y_seg, color=color, linewidth=1.5, zorder=3)
+        ax_traj.plot(est_x[i-1:i+1], est_y[i-1:i+1], color=color, linewidth=1.5, zorder=3)
 
-    # 3. Confidence Ellipses (Exactly Every 1.0 Seconds)
     last_ellipse_time = times[0] - 1.0 
     for i in range(len(times)):
         if times[i] - last_ellipse_time >= 1.0:
-            
-            # --- Dead Reckoning Ellipse ---
+            # DR Ellipse
             w_dr, h_dr, angle_dr = get_ellipse_params(dr_covariances[i], scale=dynamic_sigma) 
             ell_dr = Ellipse(xy=(dr_x[i], dr_y[i]), width=w_dr, height=h_dr, angle=angle_dr, 
-                             edgecolor='gray', linestyle='--', fc='None', lw=1.0, alpha=0.6, zorder=2)
-            ax.add_patch(ell_dr)
+                             edgecolor='gray', linestyle='--', fc='None', lw=0.8, alpha=0.6, zorder=2)
+            ax_traj.add_patch(ell_dr)
             
             dx_dr = arrow_len * math.cos(dr_theta[i])
             dy_dr = arrow_len * math.sin(dr_theta[i])
-            ax.arrow(dr_x[i], dr_y[i], dx_dr, dy_dr, color='gray', head_width=arrow_len*0.4, zorder=2)
+            ax_traj.arrow(dr_x[i], dr_y[i], dx_dr, dy_dr, color='gray', head_width=arrow_len*0.4, zorder=2)
 
-            # --- EKF Ellipse ---
+            # EKF Ellipse
             w, h, angle = get_ellipse_params(covariances[i], scale=dynamic_sigma) 
             ell_color = 'red' if occlusion_flags[i] else 'green'
             ell = Ellipse(xy=(est_x[i], est_y[i]), width=w, height=h, angle=angle, 
                           edgecolor=ell_color, fc='None', lw=1.0, alpha=0.6, zorder=4)
-            ax.add_patch(ell)
+            ax_traj.add_patch(ell)
             
             dx = arrow_len * math.cos(est_theta[i])
             dy = arrow_len * math.sin(est_theta[i])
-            ax.arrow(est_x[i], est_y[i], dx, dy, color=ell_color, head_width=arrow_len*0.4, zorder=5)
+            ax_traj.arrow(est_x[i], est_y[i], dx, dy, color=ell_color, head_width=arrow_len*0.4, zorder=5)
             
             last_ellipse_time = times[i]
 
-    # Compact Legend for 3.5x3 plot
     legend_elements = [
-        Line2D([0], [0], color='gray', linestyle='--', lw=1.5, label='DR Traj'),
+        Line2D([0], [0], color='gray', linestyle='--', lw=1.2, label='DR Traj'),
         Line2D([0], [0], color='green', lw=1.5, label='EKF (Corr)'),
         Line2D([0], [0], color='red', lw=1.5, label='EKF (Occ)'),
-        Patch(edgecolor='gray', linestyle='--', facecolor='none', lw=1, label='DR Cov'),
-        Patch(edgecolor='black', facecolor='none', lw=1, label=f'EKF {dynamic_sigma:.1f}$\sigma$')
+        Patch(edgecolor='gray', linestyle='--', facecolor='none', lw=0.8, label='DR Cov'),
+        Patch(edgecolor='black', facecolor='none', lw=1.0, label=f'EKF {dynamic_sigma:.1f}$\sigma$')
     ]
-    ax.legend(handles=legend_elements, loc='best', fontsize=6)
+    ax_traj.legend(handles=legend_elements, loc='best')
 
-    # Scaled down fonts
-    plt.title(f'Tracking vs DR\n{os.path.basename(filename)}', fontsize=8)
-    ax.set_xlabel('X Position (m)', fontsize=7)
-    ax.set_ylabel('Y Position (m)', fontsize=7)
-    ax.tick_params(axis='both', which='major', labelsize=6)
-    
-    ax.grid(True, linestyle=':', alpha=0.6)
-    ax.axis('equal') 
-    plt.tight_layout()
-    
+    ax_traj.set_title(f'Tracking vs DR\n{os.path.basename(filename)}')
+    ax_traj.set_xlabel('X Position (m)')
+    ax_traj.set_ylabel('Y Position (m)')
+    ax_traj.grid(True, linestyle=':', alpha=0.6)
+    ax_traj.axis('equal') 
+    plt.tight_layout(pad=0.2)
+
+    # ==========================
+    # 2. ERROR PLOT (3.5 x 3.0)
+    # ==========================
+    fig_err, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(3.5, 3.0), sharex=True, dpi=300)
+
+    def shade(ax):
+        for t in occlusion_times:
+            # Add a small visual span for each occluded tick
+            ax.axvspan(t, t + 0.1, color='gray', alpha=0.25)
+
+    ax1.plot(times, err_x, 'k-')
+    ax1.fill_between(times, sig_x, -np.array(sig_x), color='r', alpha=0.25)
+    shade(ax1)
+    ax1.set_ylabel("X Err (m)")
+    ax1.grid(True, linestyle=':', alpha=0.5)
+    ax1.set_title(f'EKF Errors - {os.path.basename(filename)[:15]}...')
+
+    ax2.plot(times, err_y, 'k-')
+    ax2.fill_between(times, sig_y, -np.array(sig_y), color='g', alpha=0.25)
+    shade(ax2)
+    ax2.set_ylabel("Y Err (m)")
+    ax2.grid(True, linestyle=':', alpha=0.5)
+
+    ax3.plot(times, np.degrees(err_theta), 'k-')
+    ax3.fill_between(times, np.degrees(sig_theta), -np.degrees(sig_theta), color='b', alpha=0.25)
+    shade(ax3)
+    ax3.set_ylabel("θ Err (°)")
+    ax3.set_xlabel("Time (s)")
+    ax3.grid(True, linestyle=':', alpha=0.5)
+
+    plt.tight_layout(pad=0.2)
+
+    # ==========================
+    # SAVE OR SHOW
+    # ==========================
     if save_plot:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
-        save_path = os.path.join(output_dir, f"{os.path.basename(filename).replace('.pkl', '')}_plot.png")
-        plt.savefig(save_path, dpi=300)
-        plt.close(fig)
-        print(f"   Saved plot to {save_path}")
+            
+        base_name = os.path.basename(filename).replace('.pkl', '')
+        
+        path_traj = os.path.join(output_dir, f"{base_name}_traj.png")
+        fig_traj.savefig(path_traj, dpi=300, bbox_inches='tight')
+        plt.close(fig_traj)
+        
+        path_err = os.path.join(output_dir, f"{base_name}_err.png")
+        fig_err.savefig(path_err, dpi=300, bbox_inches='tight')
+        plt.close(fig_err)
+        
+        print(f"   Saved: {base_name}_traj.png")
+        print(f"   Saved: {base_name}_err.png")
     else:
         plt.show()
 
+# --------------------------------------------------
 if __name__ == "__main__":
     pkl_files = glob.glob(os.path.join('./data/', '*.pkl'))
     

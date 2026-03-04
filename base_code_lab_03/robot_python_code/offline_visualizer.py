@@ -4,7 +4,7 @@ from matplotlib.patches import Ellipse
 import math
 import os
 
-import data_handling
+import base_code_lab_03.robot_python_code.data_handling_old as data_handling_old
 from extended_kalman_filter import ExtendedKalmanFilter
 
 def get_ellipse_params(covariance_matrix, scale=3.0):
@@ -26,7 +26,7 @@ def normalize_angle(angle):
 
 def run_visualizer(filename):
     print(f"Loading data from {filename}...")
-    ekf_data = data_handling.get_file_data_for_kf(filename)
+    ekf_data = data_handling_old.get_file_data_for_kf(filename)
 
     true_x0 = ekf_data[0][3][0]
     true_y0 = ekf_data[0][3][1]
