@@ -3,8 +3,8 @@ import math
 import numpy as np
 
 # UDP parameters
-localIP = "192.168.1.182" # Put your laptop computer's IP here 199
-arduinoIP = "192.168.1.206" # Put your arduino's IP here 200
+localIP = "192.168.50.196" # "192.168.1.182" # Put your laptop computer's IP here 199
+arduinoIP = "192.168.50.169" # "192.168.1.206" # Put your arduino's IP here 200
 localPort = 4010
 arduinoPort = 4010
 bufferSize = 1024
@@ -38,15 +38,31 @@ extra_trial_log_time = 2000 # milliseconds
 I3 = np.array([[1, 0, 0],[0, 1, 0], [0, 0, 1]])
 covariance_plot_scale = 100
 
-# PF parameters, modify the map and num particles as you see fit.
-num_particles = 100
+# # PF parameters, modify the map and num particles as you see fit.
+# num_particles = 1000
+# wall_corner_list = [
+#     [0, 0, 2.74, 0], 
+#     [0, 0, 0, 3.78], 
+#     [0, 3.78, 1.92, 3.78],
+#     [1.03, 1.61, 1.03, 2.19],
+#     [1.03, 2.19, 1.41, 2.19],
+#     [1.92, 3.78, 1.92, 3.32],
+#     [1.92, 3.32, 2.74, 3.32],
+#     [2.74, 3.32, 2.74, 0]
+#     ]
+
+# PF parameters
+num_particles = 1000
+
+# Map: 1.2m x 1.8m room with a 0.6m x 0.6m obstacle in the top right.
+# Coordinates are [x1, y1, x2, y2]
 wall_corner_list = [
-    [0, 0, 2.74, 0], 
-    [0, 0, 0, 3.78], 
-    [0, 3.78, 1.92, 3.78],
-    [1.03, 1.61, 1.03, 2.19],
-    [1.03, 2.19, 1.41, 2.19],
-    [1.92, 3.78, 1.92, 3.32],
-    [1.92, 3.32, 2.74, 3.32],
-    [2.74, 3.32, 2.74, 0]
-    ]
+    [0.0, 0.0, 1.2, 0.0],       # Bottom wall
+    [0.0, 0.0, 0.0, 1.8],       # Left wall
+    [0.0, 1.8, 0.6, 1.8],       # Top wall (left half)
+    [0.6, 1.8, 0.6, 1.2],       # Obstacle left face
+    [0.6, 1.2, 1.2, 1.2],       # Obstacle bottom face
+    [1.2, 1.2, 1.2, 0.0]        # Right wall (bottom half)
+]
+
+distance_variance = 0.000363 # Lidar confidence

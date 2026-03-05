@@ -8,9 +8,9 @@
 // char ssid[] = "Tenda_9C90E0";//"Tenda_9C95E0";//"Tenda_9C90E0";      // REPLACE with your team's router ssid
 // char pass[] = "78972629";  //"82168926";//"78972629";        // REPLACE with your team's router password"78972629"
 // char remoteIP[] = "192.168.0.199"; // "192.168.0.199"; // REPLACE with your laptop's IP address on your team's router
-char ssid[] = "Verizon_DF7HK3";      // REPLACE with your team's router ssid
-char pass[] = "gen9epoch8anise";// "12345678";          // REPLACE with your team's router password
-char remoteIP[] = "192.168.1.182"; 
+char ssid[] = "AI4CE_ARM";      // REPLACE with your team's router ssid
+char pass[] = "12345678"; //"gen9epoch8anise";// "12345678";          // REPLACE with your team's router password
+char remoteIP[] = "192.168.50.196"; //"192.168.1.182"; 
 unsigned int localPort = 4010;     // local port to listen on - no need to change
 unsigned int remotePort = 4010;    // local port to listen on - no need to change
 int status = WL_IDLE_STATUS;
