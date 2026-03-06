@@ -164,7 +164,6 @@ def visualize(ax, current_pose, history_x, history_y, angles, distances, step):
     ax.grid(True, linestyle='--', alpha=0.6)
 
 
-
 # ==========================================
 # 4. Simulation Loop
 # ==========================================

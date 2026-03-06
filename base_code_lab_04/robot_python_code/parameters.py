@@ -56,13 +56,45 @@ num_particles = 1000
 
 # Map: 1.2m x 1.8m room with a 0.6m x 0.6m obstacle in the top right.
 # Coordinates are [x1, y1, x2, y2]
-wall_corner_list = [
-    [0.0, 0.0, 1.2, 0.0],       # Bottom wall
-    [0.0, 0.0, 0.0, 1.8],       # Left wall
-    [0.0, 1.8, 0.6, 1.8],       # Top wall (left half)
-    [0.6, 1.8, 0.6, 1.2],       # Obstacle left face
-    [0.6, 1.2, 1.2, 1.2],       # Obstacle bottom face
-    [1.2, 1.2, 1.2, 0.0]        # Right wall (bottom half)
-]
+# wall_corner_list = [
+#     [0.0, 0.0, 1.2, 0.0],       # Bottom wall
+#     [0.0, 0.0, 0.0, 1.8],       # Left wall
+#     [0.0, 1.8, 0.6, 1.8],       # Top wall (left half)
+#     [0.6, 1.8, 0.6, 1.2],       # Obstacle left face
+#     [0.6, 1.2, 1.2, 1.2],       # Obstacle bottom face
+#     [1.2, 1.2, 1.2, 0.0]        # Right wall (bottom half)
+# ]
 
 distance_variance = 0.000363 # Lidar confidence
+
+
+# --- Complicated Maze Map (4.0m x 4.0m) ---
+# This layout includes an outer boundary, a central "H" divider, 
+# and a disconnected inner pillar to create complex lidar returns.
+wall_corner_list = [
+    # Outer Boundary
+    [0.0, 0.0, 4.0, 0.0],       # Bottom boundary
+    [0.0, 0.0, 0.0, 4.0],       # Left boundary
+    [0.0, 4.0, 4.0, 4.0],       # Top boundary
+    [4.0, 4.0, 4.0, 0.0],       # Right boundary
+
+    # Central Divider (Creates an L-corridor effect)
+    [0.0, 2.0, 1.5, 2.0],       # Left horizontal divider
+    [2.5, 2.0, 4.0, 2.0],       # Right horizontal divider
+    
+    # Internal Obstacles (Rooms)
+    [1.0, 3.0, 1.0, 4.0],       # Vertical partition Top-Left
+    [3.0, 0.0, 3.0, 1.0],       # Vertical partition Bottom-Right
+    
+    # The "Island" Obstacle (Center-Top)
+    [1.8, 2.8, 2.2, 2.8],       # Bottom face
+    [1.8, 3.2, 2.2, 3.2],       # Top face
+    [1.8, 2.8, 1.8, 3.2],       # Left face
+    [2.2, 2.8, 2.2, 3.2],       # Right face
+    
+    # The "Island" Obstacle (Center-Bottom)
+    [1.8, 0.8, 2.2, 0.8],       # Bottom face
+    [1.8, 1.2, 2.2, 1.2],       # Top face
+    [1.8, 0.8, 1.8, 1.2],       # Left face
+    [2.2, 0.8, 2.2, 1.2]        # Right face
+]

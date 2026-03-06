@@ -11,7 +11,7 @@ def simulate_lidar_scan(robot_x, robot_y, robot_theta):
         distances: list of distances to the walls (in meters)
     """
     walls = parameters.wall_corner_list
-    num_rays = 360
+    num_rays = 6
     max_range = 5.0
     angles = []
     distances = []
