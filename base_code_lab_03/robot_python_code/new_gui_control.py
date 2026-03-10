@@ -2,6 +2,7 @@
 import asyncio
 import cv2
 import math
+import random
 from matplotlib import pyplot as plt
 from matplotlib.patches import Ellipse
 import matplotlib
@@ -9,7 +10,6 @@ from nicegui import ui, app, run
 import numpy as np
 import time
 from fastapi import Response
-from time import time, strftime
 
 # Local libraries
 from robot import Robot
@@ -18,190 +18,228 @@ import parameters
 
 # Global variables
 logging = False
-stream_video = True
+stream_video = False
 
-# Frame converter for the video stream, from OpenCV to a JPEG image
+# =======================================================
+# Particle Filter Configuration & Kinematic Constants
+# =======================================================
+INITIAL_POSE = [0.1, 0.1, math.pi / 2]
+
+L = 0.145
+V_M = 0.004808 
+V_C = -0.045557 
+VAR_V = 0.057829 
+DELTA_COEFFS = [0.000027, 0.007798, 0.029847]
+VAR_DELTA = 0.023134
+
+MAX_RANGE = 5.0
+X_OFFSET = 0.12 
+VAR_Z = 0.0025 # 5cm map artifact tolerance
+
+def angle_wrap(angle):
+    while angle > math.pi: angle -= 2*math.pi
+    while angle < -math.pi: angle += 2*math.pi
+    return angle
+
+class MyMotionModel:
+    def __init__(self, initial_state):
+        self.state = np.array(initial_state, dtype=float)
+
+    def step_update(self, v_cmd, steering_angle_command, delta_t):
+        v_expected = (V_M * v_cmd) + V_C
+        if v_expected < 0 and v_cmd > 0: v_expected = 0.0
+        alpha = steering_angle_command
+        delta_expected = DELTA_COEFFS[0]*(alpha**2) + DELTA_COEFFS[1]*alpha + DELTA_COEFFS[2]
+        w_expected = (v_expected * math.tan(delta_expected)) / L if L > 0 else 0
+
+        self.state[0] += delta_t * v_expected * math.cos(self.state[2])
+        self.state[1] += delta_t * v_expected * math.sin(self.state[2])
+        self.state[2] = angle_wrap(self.state[2] - delta_t * w_expected)
+
+class Particle:
+    def __init__(self, x, y, theta):
+        self.x, self.y, self.theta = x, y, theta
+        self.weight = 1.0
+        self.log_w = 0.0 
+
+    def predict(self, v_cmd, alpha_cmd, dt):
+        v_expected = (V_M * v_cmd) + V_C
+        if v_expected < 0 and v_cmd > 0: v_expected = 0.0
+        delta_expected = DELTA_COEFFS[0]*(alpha_cmd**2) + DELTA_COEFFS[1]*alpha_cmd + DELTA_COEFFS[2]
+
+        if v_expected > 0:
+            v_s = v_expected + random.gauss(0, math.sqrt(VAR_V))
+            d_s = delta_expected + random.gauss(0, math.sqrt(VAR_DELTA))
+        else:
+            v_s = 0.0
+            d_s = delta_expected
+
+        w_s = (v_s * math.tan(d_s)) / L if L > 0 else 0.0
+        self.x += v_s * math.cos(self.theta) * dt
+        self.y += v_s * math.sin(self.theta) * dt
+        self.theta = angle_wrap(self.theta - w_s * dt) 
+
+    def update_weight(self, angles, distances):
+        log_w = 0.0
+        ray_step = 10 
+        xs = self.x + X_OFFSET * math.cos(self.theta)
+        ys = self.y + X_OFFSET * math.sin(self.theta)
+
+        for i in range(0, len(angles), ray_step):
+            raw_dist = distances[i]
+            if raw_dist < 100 or raw_dist >= 4900: continue
+            dist_m = raw_dist / 1000.0
+            angle_rad = -(angles[i] * math.pi / 180.0)
+            global_angle = angle_wrap(self.theta + angle_rad)
+            rx, ry = math.cos(global_angle), math.sin(global_angle)
+            min_dist = MAX_RANGE
+            
+            for wall in parameters.wall_corner_list:
+                qx, qy, bx, by = wall
+                sx, sy = bx - qx, by - qy
+                denom = rx * sy - ry * sx
+                if abs(denom) > 1e-6:
+                    t = ((qx - xs) * sy - (qy - ys) * sx) / denom
+                    u = ((qx - xs) * ry - (qy - ys) * rx) / denom
+                    if 0 <= u <= 1 and 0 < t < min_dist: min_dist = t
+                        
+            if min_dist < MAX_RANGE:
+                error = min_dist - dist_m
+                penalty = (error**2) / (2 * VAR_Z)
+                log_w -= min(penalty, 10.0) 
+            else:
+                log_w -= 10.0 
+        self.log_w = log_w
+
+class ParticleFilter:
+    def __init__(self, num_particles, initial_pose):
+        self.num_particles = num_particles
+        self.particles = []
+        all_walls = np.array(parameters.wall_corner_list)
+        self.x_min, self.x_max = np.min(all_walls[:, [0, 2]]), np.max(all_walls[:, [0, 2]])
+        self.y_min, self.y_max = np.min(all_walls[:, [1, 3]]), np.max(all_walls[:, [1, 3]])
+        self.global_initialization(initial_pose)
+
+    def global_initialization(self, pose):
+        self.particles = []
+        while len(self.particles) < self.num_particles:
+            x = random.gauss(pose[0], 0.1)
+            y = random.gauss(pose[1], 0.1)
+            if not (self.x_min <= x <= self.x_max and self.y_min <= y <= self.y_max): continue
+            theta = angle_wrap(random.gauss(pose[2], 0.1))
+            self.particles.append(Particle(x, y, theta))
+
+    def predict(self, v_cmd, alpha_cmd, dt):
+        for p in self.particles: p.predict(v_cmd, alpha_cmd, dt)
+
+    def correct(self, angles, distances):
+        if len(angles) < 10: return 
+        for p in self.particles: p.update_weight(angles, distances)
+        max_log_w = max(p.log_w for p in self.particles)
+        for p in self.particles: p.weight = math.exp(p.log_w - max_log_w)
+        self.resample()
+
+    def resample(self):
+        weights = [p.weight for p in self.particles]
+        new_particles = []
+        index = random.randint(0, self.num_particles - 1)
+        beta = 0.0
+        max_w = max(weights)
+        for _ in range(self.num_particles):
+            beta += random.uniform(0, 2.0 * max_w)
+            while beta > weights[index]:
+                beta -= weights[index]
+                index = (index + 1) % self.num_particles
+            p = self.particles[index]
+            new_particles.append(Particle(p.x, p.y, p.theta))
+        self.particles = new_particles
+
+    def get_estimate(self):
+        sum_x = sum(p.x for p in self.particles)
+        sum_y = sum(p.y for p in self.particles)
+        sum_sin = sum(math.sin(p.theta) for p in self.particles)
+        sum_cos = sum(math.cos(p.theta) for p in self.particles)
+        return [sum_x / self.num_particles, sum_y / self.num_particles, math.atan2(sum_sin, sum_cos)]
+
+
+# Frame converter for the video stream
 def convert(frame: np.ndarray) -> bytes:
     _, imencode_image = cv2.imencode('.jpg', frame)
     return imencode_image.tobytes()
-
-# Create the connection with a real camera.
+    
 def connect_with_camera():
-    video_capture = cv2.VideoCapture(parameters.camera_id)
+    video_capture = cv2.VideoCapture(1)
     return video_capture
-
+    
 def update_video(video_image):
-    if stream_video and video_image is not None:
+    if stream_video:
         video_image.force_reload()
 
 def get_time_in_ms():
-    return int(time()*1000)
-
-# --- THEME COLORS ---
-CARD_BG = 'bg-slate-900'
-ACCENT_COLOR = 'blue-500' 
-TEXT_COLOR = 'text-slate-200'
-HEADER_BG = 'bg-slate-950'
+    return int(time.time()*1000)
 
 # Create the gui page
 @ui.page('/')
 def main():
+    # Robot variables
+    robot = Robot()
 
-    # 控制目标 (单位: 米, 弧度)
-    targets = {
-        'x': 1.0,
-        'y': 0.0,
-        'theta': 0.0  # 最终停止时的朝向
+    # --- Initialize Live Particle Filter State ---
+    # Using 800 particles so the GUI thread doesn't bottleneck
+    pf = ParticleFilter(num_particles=800, initial_pose=INITIAL_POSE)
+    dr = MyMotionModel(initial_state=INITIAL_POSE)
+    
+    # Pre-compute map bounds for dynamic UI zooming
+    all_walls = np.array(parameters.wall_corner_list)
+    x_min, x_max = np.min(all_walls[:, [0, 2]]), np.max(all_walls[:, [0, 2]])
+    y_min, y_max = np.min(all_walls[:, [1, 3]]), np.max(all_walls[:, [1, 3]])
+    x_pad, y_pad = (x_max - x_min) * 0.1, (y_max - y_min) * 0.1
+
+    history = {'est_x': [], 'est_y': [], 'dr_x': [], 'dr_y': []}
+    
+    pf_state = {
+        'last_time': time.time(),
+        'sweep_angles': [],
+        'sweep_distances': [],
+        'last_lidar_angle': None
     }
 
-    # 速度 PD 参数 (控制前进距离)
-    pd_params_speed = {'kp': 60.0, 'kd': 15.0, 'last_error': 0.0}
-
-    # 转向 PD 参数 (控制车头指向)
-    pd_params_steer = {'kp': 45.0, 'kd': 10.0, 'last_error': 0.0}
-    
-    # --- STYLING SETUP ---
+    # Set dark mode for gui
     dark = ui.dark_mode()
     dark.value = True
     
-    ui.add_head_html('''
-        <style>
-            .nicegui-content { padding: 0 !important; margin: 0 !important; max-width: 100% !important; }
-            .q-card { border-radius: 16px; border: 1px solid #334155; }
-            .q-slider__track-container { height: 6px; border-radius: 3px; }
-        </style>
-    ''')
-
-    # Robot variables
-    robot = Robot()
-    
-    # Store latest frame globally for UI streaming and recording
-    latest_frame = None
-    
-    # Manage video, measurement recording state, and trajectory tracking
-    app_state = {
-        'video_writer': None,
-        'csv_file': None,
-        'ekf_hist': [],   # Stores tuples of (x, y, is_occluded)
-        'dr_x': [],       # Dead Reckoning X
-        'dr_y': [],       # Dead Reckoning Y
-        'dr_theta': 0.0,
-        'last_encoder': 0,
-        'last_cam_sig': []
-    }
-
-    # Lidar data setup
-    max_lidar_range = 12
-    lidar_angle_res = 2
-    num_angles = int(360 / lidar_angle_res)
-    lidar_distance_list = []
-    lidar_cos_angle_list = []
-    lidar_sin_angle_list = []
-    for i in range(num_angles):
-        lidar_distance_list.append(max_lidar_range)
-        lidar_cos_angle_list.append(math.cos(i*lidar_angle_res/180*math.pi))
-        lidar_sin_angle_list.append(math.sin(i*lidar_angle_res/180*math.pi))
-
-    # Set up the video stream
     if stream_video:
         video_capture = cv2.VideoCapture(parameters.camera_id)
     
     @app.get('/video/frame')
     async def grab_video_frame() -> Response:
-        empty_response = Response(content=b'', media_type='image/jpeg')
         if not video_capture.isOpened():
-            return empty_response
-            
-        read_result = await run.io_bound(video_capture.read)
-        if read_result is not None:
-            ret, frame = read_result
-            if frame is None:
-                return empty_response
-            jpeg = await run.cpu_bound(convert, frame)
-            return Response(content=jpeg, media_type='image/jpeg')
-        return empty_response
+            return placeholder
+        _, frame = await run.io_bound(video_capture.read)
+        if frame is None:
+            return placeholder
+        jpeg = await run.cpu_bound(convert, frame)
+        return Response(content=jpeg, media_type='image/jpeg')
 
-    # Logic Functions
-    def update_lidar_data():
-        for i in range(robot.robot_sensor_signal.num_lidar_rays):
-            distance_in_mm = robot.robot_sensor_signal.distances[i]
-            angle = 360-robot.robot_sensor_signal.angles[i]
-            if distance_in_mm > 20 and abs(angle) < 360:
-                index = max(0,min(int(360/lidar_angle_res-1),int((angle-(lidar_angle_res/2))/lidar_angle_res)))
-                lidar_distance_list[index] = distance_in_mm/1000
-               
-    # def update_commands():
-    #     if robot.running_trial:
-    #         delta_time = get_time_in_ms() - robot.trial_start_time
-    #         trial_timer_label.set_text(f'{delta_time/1000:.1f}s')
-            
-    #         if delta_time > parameters.trial_time:
-    #             robot.running_trial = False
-    #             speed_switch.value = False
-    #             steering_switch.value = False
-    #             robot.extra_logging = True
-    #             ui.notify('Trial Ended', type='positive')
-
-    #     if robot.extra_logging:
-    #         delta_time = get_time_in_ms() - robot.trial_start_time
-    #         if delta_time > parameters.trial_time + parameters.extra_trial_log_time:
-    #             logging_switch.value = False
-    #             robot.extra_logging = False
-
-    #     if speed_switch.value:
-    #         cmd_speed = slider_speed.value
-    #     else:
-    #         cmd_speed = 0
-    #     if steering_switch.value:
-    #         cmd_steering_angle = slider_steering.value
-    #     else:
-    #         cmd_steering_angle = 0
-    #     return cmd_speed, cmd_steering_angle
     def update_commands():
-        # 获取 EKF 状态
-        curr_x = robot.extended_kalman_filter.state_mean[0]
-        curr_y = robot.extended_kalman_filter.state_mean[1]
-        curr_theta = robot.extended_kalman_filter.state_mean[2]
-        
-        dt = 0.1
-
-        # --- 1. 计算位置误差 (Distance Error) ---
-        dx = targets['x'] - curr_x
-        dy = targets['y'] - curr_y
-        dist_error = math.sqrt(dx**2 + dy**2)
-        
-        # 如果离目标点很近了（比如 5cm 内），就切换为控制最终朝向，否则控制瞄准目标点
-        if dist_error > 0.1:
-            # 瞄准误差：目标点相对于当前车头的夹角
-            target_heading = math.atan2(dy, dx)
-            steer_error = target_heading - curr_theta
-        else:
-            # 到达位置后，调整到目标 orientation
-            steer_error = targets['theta'] - curr_theta
-            dist_error = 0 # 到达位置后停止前进，只旋转
-
-        # 角度环绕处理 (-pi 到 pi)
-        steer_error = (steer_error + math.pi) % (2 * math.pi) - math.pi
-
-        # --- 2. 速度 PD 计算 ---
-        deriv_speed = (dist_error - pd_params_speed['last_error']) / dt
-        cmd_speed = (pd_params_speed['kp'] * dist_error) + (pd_params_speed['kd'] * deriv_speed)
-        pd_params_speed['last_error'] = dist_error
-
-        # --- 3. 转向 PD 计算 ---
-        deriv_steer = (steer_error - pd_params_steer['last_error']) / dt
-        cmd_steer = (pd_params_steer['kp'] * steer_error) + (pd_params_steer['kd'] * deriv_steer)
-        pd_params_steer['last_error'] = steer_error
-
-        # --- 输出限幅与状态检查 ---
         if robot.running_trial:
-            final_speed = max(min(cmd_speed, 80), -80) # 留点余量
-            final_steer = max(min(cmd_steer, 20), -20)
-        else:
-            final_speed = 0
-            final_steer = 0
-            
-        return final_speed, final_steer
+            delta_time = get_time_in_ms() - robot.trial_start_time
+            if delta_time > parameters.trial_time:
+                robot.running_trial = False
+                speed_switch.value = False
+                steering_switch.value = False
+                robot.extra_logging = True
+                print("End Trial :", delta_time)
+        
+        if robot.extra_logging:
+            delta_time = get_time_in_ms() - robot.trial_start_time
+            if delta_time > parameters.trial_time + parameters.extra_trial_log_time:
+                logging_switch.value = False
+                robot.extra_logging = False
+
+        cmd_speed = slider_speed.value if speed_switch.value else 0
+        cmd_steering_angle = slider_steering.value if steering_switch.value else 0
+        return cmd_speed, cmd_steering_angle
         
     def update_connection_to_robot():
         if udp_switch.value:
@@ -210,125 +248,65 @@ def main():
                 if udp_success:
                     robot.setup_udp_connection(udp)
                     robot.connected_to_hardware = True
-                    status_indicator.classes('bg-green-500', remove='bg-red-500')
-                    status_label.set_text('Connected')
+                    print("Should be set for UDP!")
                 else:
                     udp_switch.value = False
                     robot.connected_to_hardware = False
-                    ui.notify('Connection Failed', type='negative')
         else:
             if robot.connected_to_hardware:
                 robot.eliminate_udp_connection()
                 robot.connected_to_hardware = False
-                status_indicator.classes('bg-red-500', remove='bg-green-500')
-                status_label.set_text('Disconnected')
-    
+
     def enable_speed(): pass
     def enable_steering(): pass
 
-    # Pure Kinematics for plotting the Dead Reckoning trail
-    def update_dr(enc_counts, steer_cmd, dr_x, dr_y, dr_theta, last_enc):
-        L = 0.145
-        KE_VALUE = 0.0001345210
-        DELTA_COEFFS = [0.000027, 0.007798, 0.029847]
-        
-        de = enc_counts - last_enc
-        s = de * KE_VALUE
-        alpha = steer_cmd
-        delta = DELTA_COEFFS[0]*(alpha**2) + DELTA_COEFFS[1]*alpha + DELTA_COEFFS[2]
-        
-        # Standard Polar Kinematics (Starts at pi/2)
-        nx = dr_x + s * math.cos(dr_theta)
-        ny = dr_y + s * math.sin(dr_theta)
-        nth = dr_theta - (s * math.tan(delta)) / L
-        nth = (nth + math.pi) % (2 * math.pi) - math.pi
-        
-        return nx, ny, nth
-
+    # --- Live Particle Filter Visualization ---
     def show_localization_plot():
         with main_plot:
             fig = main_plot.fig
-            fig.patch.set_facecolor('#0f172a')
+            fig.patch.set_facecolor('black')
             plt.clf()
-            
-            ax = plt.gca()
-            ax.set_facecolor('#0f172a')
-            ax.spines['bottom'].set_color('#334155')
-            ax.spines['top'].set_color('#334155')
-            ax.spines['right'].set_color('#334155')
-            ax.spines['left'].set_color('#334155')
-            ax.tick_params(axis='x', colors='#94a3b8')
-            ax.tick_params(axis='y', colors='#94a3b8')
+            plt.style.use('dark_background')
+            plt.tick_params(axis='x', colors='lightgray')
+            plt.tick_params(axis='y', colors='lightgray')
 
-            # --- PLOT DEAD RECKONING ---
-            if len(app_state['dr_x']) > 0:
-                ax.plot(app_state['dr_x'], app_state['dr_y'], color='gray', linestyle='--', linewidth=2, label='Dead Reckoning')
+            # 1. Draw Map
+            for wall in parameters.wall_corner_list:
+                plt.plot([wall[0], wall[2]], [wall[1], wall[3]], color='white', linewidth=2, zorder=1)
 
-            # --- PLOT EKF TRAJECTORY SEGMENTS ---
-            ekf_hist = app_state['ekf_hist']
-            for i in range(1, len(ekf_hist)):
-                x0, y0, occ0 = ekf_hist[i-1]
-                x1, y1, occ1 = ekf_hist[i]
-                color = '#ef4444' if occ1 else '#22c55e' # Red if Occluded, Green if Corrected
-                ax.plot([x0, x1], [y0, y1], color=color, linewidth=2)
+            # 2. Draw Particles (Subsampled to keep GUI fast)
+            px, py = [p.x for p in pf.particles[::2]], [p.y for p in pf.particles[::2]]
+            plt.scatter(px, py, s=2, c='green', alpha=0.3, zorder=2)
 
-            # Dummy lines for Legend
-            ax.plot([], [], color='#22c55e', linewidth=2, label='EKF (Corrected)')
-            ax.plot([], [], color='#ef4444', linewidth=2, label='EKF (Occluded)')
-            
-            # --- PLOT CURRENT EKF STATE ---
-            x_est = robot.extended_kalman_filter.state_mean[0]
-            y_est = robot.extended_kalman_filter.state_mean[1]
-            theta_est = robot.extended_kalman_filter.state_mean[2]
-            
-            current_is_occluded = False
-            if len(ekf_hist) > 0:
-                current_is_occluded = ekf_hist[-1][2]
-                
-            ell_color = '#ef4444' if current_is_occluded else '#22c55e'
-            
-            sigma = 3
-            covar_matrix = parameters.covariance_plot_scale * robot.extended_kalman_filter.state_covariance[0:2,0:2]
-            lambda_, v = np.linalg.eig(covar_matrix)
-            lambda_ = np.sqrt(lambda_)
-            angle = np.rad2deg(np.arctan2(*v[:,0][::-1]))
-            
-            ell = Ellipse(xy=(x_est, y_est), alpha=0.3, facecolor=ell_color, width=lambda_[0], height=lambda_[1], angle=angle)
-            ax.add_artist(ell)
-            
-            # Robot Heading Arrow (Standard Polar Mapping)
-            dir_length = 0.15
-            ax.plot([x_est, x_est + dir_length * math.cos(theta_est)], 
-                    [y_est, y_est + dir_length * math.sin(theta_est)], color=ell_color, linewidth=2)
-            ax.plot(x_est, y_est, 'o', color=ell_color, markersize=5)
+            # 3. Draw Paths
+            plt.plot(history['dr_x'], history['dr_y'], color='orange', linestyle='--', linewidth=1.5, alpha=0.8, zorder=3)
+            plt.plot(history['est_x'], history['est_y'], color='blue', linestyle='-', linewidth=1.5, alpha=0.6, zorder=4)
 
-            # --- PLOT TARGET POINT --- (一个蓝色的 X)
-            plt.plot(targets['x'], targets['y'], 'bx', markersize=10, label='Goal')
+            # 4. Draw Current Lidar Rays (Using current live data buffer)
+            est_pose = pf.get_estimate()
+            xs = est_pose[0] + X_OFFSET * math.cos(est_pose[2])
+            ys = est_pose[1] + X_OFFSET * math.sin(est_pose[2])
             
-            # 绘制目标朝向 (一条短蓝色虚线)
-            goal_th = math.radians(targets['theta'])
-            plt.plot([targets['x'], targets['x'] + 0.2 * math.cos(goal_th)],
-                    [targets['y'], targets['y'] + 0.2 * math.sin(goal_th)], 
-                    'b--', alpha=0.6)
+            # Show the raw rays hitting right now
+            for i in range(0, robot.robot_sensor_signal.num_lidar_rays, 5):
+                dist = robot.robot_sensor_signal.distances[i]
+                if 100 < dist < 4900:
+                    dist_m = dist / 1000.0
+                    ang_rad = -(robot.robot_sensor_signal.angles[i] * math.pi / 180.0)
+                    global_angle = angle_wrap(est_pose[2] + ang_rad)
+                    hx = xs + dist_m * math.cos(global_angle)
+                    hy = ys + dist_m * math.sin(global_angle)
+                    plt.plot([xs, hx], [ys, hy], color='red', alpha=0.2, linewidth=0.5, zorder=5)
 
-            # --- PLOT RAW CAMERA MEASUREMENT ---
-            z_x = robot.camera_sensor_signal[0]
-            z_y = robot.camera_sensor_signal[1]
-            
-            if not current_is_occluded and (z_x != 0.0 or z_y != 0.0):
-                ax.plot(z_x, z_y, 'cx', markersize=8, markeredgewidth=2, label='Camera (Z_t)')
+            # 5. Draw Robot States
+            plt.plot(dr.state[0], dr.state[1], 'o', color='orange', markersize=5, zorder=6)
+            plt.plot(est_pose[0], est_pose[1], 'mo', markersize=5, zorder=7)
+            plt.quiver(est_pose[0], est_pose[1], math.cos(est_pose[2]), math.sin(est_pose[2]), color='magenta', scale=15, width=0.007, zorder=8)
 
-            # Add Clean Legend
-            handles, labels = ax.get_legend_handles_labels()
-            by_label = dict(zip(labels, handles))
-            ax.legend(by_label.values(), by_label.keys(), loc='upper left', facecolor='#0f172a', edgecolor='#334155', labelcolor='#94a3b8', fontsize=8)
-
-            plt.grid(True, color='#1e293b', linestyle='--')
-            
-            plot_range = 1.0
-            plt.xlim(x_est - plot_range, x_est + plot_range)
-            plt.ylim(y_est - plot_range, y_est + plot_range)
-            ax.set_aspect('equal')
+            plt.grid(True, linestyle='--', alpha=0.3)
+            plt.xlim(x_min - x_pad, x_max + x_pad)
+            plt.ylim(y_min - y_pad, y_max + y_pad)
+            plt.gca().set_aspect('equal', adjustable='box')
 
     def run_trial():
         robot.trial_start_time = get_time_in_ms()
@@ -336,183 +314,105 @@ def main():
         steering_switch.value = True
         speed_switch.value = True
         logging_switch.value = True
-        ui.notify('Trial Started', type='info')
-        
-        # Reset Histories for new trial
-        app_state['ekf_hist'].clear()
-        app_state['dr_x'].clear()
-        app_state['dr_y'].clear()
-        app_state['dr_theta'] = robot.extended_kalman_filter.state_mean[2]
-        app_state['last_encoder'] = robot.robot_sensor_signal.encoder_counts
-        app_state['last_cam_sig'] = list(robot.camera_sensor_signal)
-        
-        # --- GUI RECORDING START (VIDEO & CSV) ---
-        cmd_s = slider_speed.value
-        cmd_st = slider_steering.value
-        base_filename = parameters.filename_start + f"_{cmd_s}_{cmd_st}_" + strftime("%d_%m_%y_%H_%M_%S")
-        
-        csv_filename = base_filename + "_measurements.csv"
-        app_state['csv_file'] = open(csv_filename, 'w')
-        app_state['csv_file'].write("timestamp_ms,z_x,z_y,z_theta\n")
+        print("Start time:", robot.trial_start_time)
 
-        if stream_video and video_capture.isOpened():
-            video_filename = base_filename + ".mp4"
-            width = int(video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            app_state['video_writer'] = cv2.VideoWriter(video_filename, fourcc, 10.0, (width, height))
-
-    # --- UI LAYOUT ---
-    with ui.header().classes(f'{HEADER_BG} shadow-md p-4 flex items-center justify-between'):
-        with ui.row().classes('items-center gap-2'):
-            ui.icon('smart_toy', size='32px', color='blue-400')
-            ui.label('Robot Command Center').classes('text-xl font-bold tracking-wide text-white')
-        
-        with ui.row().classes('items-center gap-2 bg-slate-800 px-3 py-1 rounded-full'):
-            status_indicator = ui.element('div').classes('w-3 h-3 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.6)]')
-            status_label = ui.label('Disconnected').classes('text-xs font-semibold text-slate-300')
-
-    with ui.column().classes('w-full p-6 gap-6 items-center max-w-7xl mx-auto'):
-        
-        with ui.grid(columns=3).classes('w-full gap-6'):
-            
-            with ui.card().classes(f'w-full {CARD_BG} p-0 overflow-hidden relative group'):
-                ui.label('Camera Feed').classes('absolute top-3 left-4 z-10 text-xs font-bold text-white/70 bg-black/50 px-2 py-1 rounded backdrop-blur-sm')
+    # Create the gui title bar
+    with ui.card().classes('w-full  items-center'):
+        ui.label('ROB-GY - 6213: Robot Navigation & Localization').style('font-size: 24px;')
+    
+    with ui.card().classes('w-full'):
+        with ui.grid(columns=3).classes('w-full items-center'):
+            with ui.card().classes('w-full items-center h-60'):
                 if stream_video:
-                    video_image = ui.interactive_image('/video/frame').classes('w-full h-64 object-cover')
+                    video_image = ui.interactive_image('/video/frame').classes('w-full h-full')
                 else:
-                    with ui.column().classes('w-full h-64 items-center justify-center bg-slate-800'):
-                        ui.icon('videocam_off', size='48px', color='slate-600')
-                        ui.label('No Video Stream').classes('text-slate-500 text-sm mt-2')
+                    ui.image('./a_robot_image.jpg').props('height=2')
                     video_image = None
             
-            with ui.card().classes(f'w-full {CARD_BG} items-center justify-center p-2'):
-                main_plot = ui.pyplot(figsize=(3.5, 3.5), close=False) 
-            
-            with ui.card().classes(f'w-full {CARD_BG} p-5 flex flex-col justify-between h-full'):
-                ui.label('Telemetry').classes('text-sm font-bold text-slate-400 mb-4 uppercase tracking-wider')
-
-                with ui.card().classes(f'w-full {CARD_BG} p-4 mt-4'):
-                    ui.label('Navigation Targets').classes('text-sm font-bold text-slate-400 uppercase mb-4')
-                    with ui.row().classes('w-full items-center gap-4'):
-                        ui.number('Target X', format='%.2f').bind_value(targets, 'x').classes('w-24')
-                        ui.number('Target Y', format='%.2f').bind_value(targets, 'y').classes('w-24')
-                        ui.number('Target θ (deg)', format='%.0f', on_change=lambda e: targets.update({'theta': math.radians(e.value)})).classes('w-24')
+            # Matplotlib Visualizer Window
+            with ui.card().classes('w-full items-center h-60'):
+                main_plot = ui.pyplot(figsize=(3, 3))
                 
-                with ui.row().classes('items-baseline justify-between w-full mb-2'):
-                    ui.label('Encoder Count').classes(TEXT_COLOR)
-                    encoder_count_label = ui.label('0').classes('text-2xl font-mono text-blue-400')
+            with ui.card().classes('items-center h-60'):
+                ui.label('Encoder:').style('text-align: center;')
+                encoder_count_label = ui.label('0')
+                logging_switch = ui.switch('Data Logging ')
+                udp_switch = ui.switch('Robot Connect')
+                run_trial_button = ui.button('Run Trial', on_click=lambda:run_trial())
                 
-                ui.separator().classes('bg-slate-700 my-4')
-                
-                with ui.column().classes('w-full gap-3'):
-                    logging_switch = ui.switch('Data Logging').props('color=blue keep-color').classes('text-slate-300 w-full')
-                    udp_switch = ui.switch('Hardware Connection').props('color=green keep-color').classes('text-slate-300 w-full')
-                    
-                    with ui.row().classes('w-full items-center justify-between mt-2'):
-                        run_trial_button = ui.button('START TRIAL', on_click=lambda:run_trial()).props('unelevated').classes('bg-blue-600 hover:bg-blue-500 text-white w-2/3 rounded-lg')
-                        trial_timer_label = ui.label('0.0s').classes('text-slate-400 font-mono text-sm')
+    # Sliders
+    with ui.card().classes('w-full'):
+        with ui.grid(columns=4).classes('w-full'):
+            with ui.card().classes('w-full items-center'):
+                ui.label('SPEED:').style('text-align: center;')
+            with ui.card().classes('w-full items-center'):
+                slider_speed = ui.slider(min=0, max=100, value=0)
+            with ui.card().classes('w-full items-center'):
+                ui.label().bind_text_from(slider_speed, 'value').style('text-align: center;')
+            with ui.card().classes('w-full items-center'):
+                speed_switch = ui.switch('Enable', on_change=lambda: enable_speed())
 
-        with ui.card().classes(f'w-full {CARD_BG} p-6'):
-            ui.label('Drive Control').classes('text-sm font-bold text-slate-400 mb-6 uppercase tracking-wider')
-            
-            with ui.grid(columns=2).classes('w-full gap-12'):
-                
-                with ui.column().classes('w-full gap-2'):
-                    with ui.row().classes('w-full justify-between items-center'):
-                        with ui.row().classes('items-center gap-2'):
-                            ui.icon('speed', color='blue-400')
-                            ui.label('Speed').classes('text-lg font-medium text-white')
-                        speed_switch = ui.switch(on_change=lambda: enable_speed()).props('color=blue dense')
-                    
-                    slider_speed = ui.slider(min=-100, max=100, value=0).props('label-always color=blue track-size=6px thumb-size=20px').classes('mt-4')
-                    ui.label('Throttle %').classes('text-xs text-slate-500 mt-1 self-end')
+    with ui.card().classes('w-full'):
+        with ui.grid(columns=4).classes('w-full'):
+            with ui.card().classes('w-full items-center'):
+                ui.label('STEER:').style('text-align: center;')
+            with ui.card().classes('w-full items-center'):
+                slider_steering = ui.slider(min=-20, max=20, value=0)
+            with ui.card().classes('w-full items-center'):
+                ui.label().bind_text_from(slider_steering, 'value').style('text-align: center;')
+            with ui.card().classes('w-full items-center'):
+                steering_switch = ui.switch('Enable', on_change=lambda: enable_steering())
+        
 
-                with ui.column().classes('w-full gap-2'):
-                    with ui.row().classes('w-full justify-between items-center'):
-                        with ui.row().classes('items-center gap-2'):
-                            ui.icon('directions_car', color='blue-400')
-                            ui.label('Steering').classes('text-lg font-medium text-white')
-                        steering_switch = ui.switch(on_change=lambda: enable_steering()).props('color=blue dense')
-                    
-                    slider_steering = ui.slider(min=-20, max=20, value=0).props('label-always color=blue track-size=6px thumb-size=20px').classes('mt-4')
-                    
-                    with ui.row().classes('w-full justify-between text-xs text-slate-500 mt-1'):
-                        ui.label('Left')
-                        ui.label('Center')
-                        ui.label('Right')
-
+    # --- Integrated Control Loop ---
     async def control_loop():
-        nonlocal latest_frame
         update_connection_to_robot()
         cmd_speed, cmd_steering_angle = update_commands()
-        
-        if stream_video and video_capture.isOpened():
-            read_result = await run.io_bound(video_capture.read)
-            if read_result is not None:
-                ret, latest_frame = read_result
-
-        # --- GUI MEASUREMENT & VIDEO RECORDING TICK ---
-        if logging_switch.value:
-            if app_state['video_writer'] is not None and latest_frame is not None:
-                app_state['video_writer'].write(latest_frame)
-            if app_state['csv_file'] is not None:
-                z_x = robot.camera_sensor_signal[0]
-                z_y = robot.camera_sensor_signal[1]
-                z_th = robot.camera_sensor_signal[5]
-                app_state['csv_file'].write(f"{get_time_in_ms()},{z_x},{z_y},{z_th}\n")
-            
-        # --- GUI RECORDING STOP ---
-        if not logging_switch.value:
-            if app_state['video_writer'] is not None:
-                app_state['video_writer'].release()
-                app_state['video_writer'] = None
-            if app_state['csv_file'] is not None:
-                app_state['csv_file'].close()
-                app_state['csv_file'] = None
-
-        # Execute standard EKF math inside the Robot
         robot.control_loop(cmd_speed, cmd_steering_angle, logging_switch.value)
-        
-        # --- GUI TRAJECTORY LOGIC ---
-        cam_sig = list(robot.camera_sensor_signal)
-        is_occluded = (app_state.get('last_cam_sig') == cam_sig)
-        app_state['last_cam_sig'] = cam_sig
-        
-        if logging_switch.value:
-            x_est = robot.extended_kalman_filter.state_mean[0]
-            y_est = robot.extended_kalman_filter.state_mean[1]
-            
-            # Save segment for the plot line
-            app_state['ekf_hist'].append((x_est, y_est, is_occluded))
-            
-            # Calculate Dead Reckoning path
-            if len(app_state['dr_x']) == 0:
-                app_state['dr_x'].append(x_est)
-                app_state['dr_y'].append(y_est)
-                app_state['dr_theta'] = robot.extended_kalman_filter.state_mean[2]
-            else:
-                nx, ny, nth = update_dr(
-                    robot.robot_sensor_signal.encoder_counts,
-                    cmd_steering_angle,
-                    app_state['dr_x'][-1],
-                    app_state['dr_y'][-1],
-                    app_state['dr_theta'],
-                    app_state['last_encoder']
-                )
-                app_state['dr_x'].append(nx)
-                app_state['dr_y'].append(ny)
-                app_state['dr_theta'] = nth
-                
-        app_state['last_encoder'] = robot.robot_sensor_signal.encoder_counts
-
         encoder_count_label.set_text(robot.robot_sensor_signal.encoder_counts)
-        show_localization_plot() 
         
-        if stream_video and latest_frame is not None:
-            update_video(video_image)
+        # 1. Setup Time Delta
+        current_time = time.time()
+        dt = current_time - pf_state['last_time']
+        pf_state['last_time'] = current_time
+
+        # 2. Step the Filter (Only if Hardware is Active & Flowing)
+        if robot.connected_to_hardware and dt > 0:
+            
+            # Predict
+            pf.predict(cmd_speed, cmd_steering_angle, dt)
+            dr.step_update(cmd_speed, cmd_steering_angle, dt)
+
+            # Accumulate 360 Sweep
+            sweep_complete = False
+            for i in range(robot.robot_sensor_signal.num_lidar_rays):
+                ang = robot.robot_sensor_signal.angles[i]
+                dist = robot.robot_sensor_signal.distances[i]
+                
+                if pf_state['last_lidar_angle'] is not None and abs(ang - pf_state['last_lidar_angle']) > 180:
+                    sweep_complete = True
+                    
+                pf_state['sweep_angles'].append(ang)
+                pf_state['sweep_distances'].append(dist)
+                pf_state['last_lidar_angle'] = ang
+            
+            # Correct
+            if sweep_complete:
+                pf.correct(pf_state['sweep_angles'], pf_state['sweep_distances'])
+                pf_state['sweep_angles'] = []
+                pf_state['sweep_distances'] = []
+
+            # Save Live History
+            est_pose = pf.get_estimate()
+            history['est_x'].append(est_pose[0])
+            history['est_y'].append(est_pose[1])
+            history['dr_x'].append(dr.state[0])
+            history['dr_y'].append(dr.state[1])
+
+        # 3. Always refresh the UI Plot
+        show_localization_plot()
         
     ui.timer(0.1, control_loop)
 
-if __name__ in {"__main__", "__mp_main__"}:
-    ui.run(native=True, title='Robot Dashboard', dark=True)
+# Run the gui
+ui.run(native=True)

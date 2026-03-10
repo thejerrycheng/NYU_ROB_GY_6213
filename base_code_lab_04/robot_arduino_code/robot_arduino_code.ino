@@ -5,12 +5,10 @@
 #define SendDeltaTimeInMs 100      // Number ms between messages sent to laptop
 #define ReceiveDeltaTimeInMs 10    // Number ms between checking for control signals sent from laptop
 #define NoSignalDeltaTimeInMs 2000 // Number ms between message receives from laptop before stopping robot
-// char ssid[] = "Tenda_9C90E0";//"Tenda_9C95E0";//"Tenda_9C90E0";      // REPLACE with your team's router ssid
-// char pass[] = "78972629";  //"82168926";//"78972629";        // REPLACE with your team's router password"78972629"
-// char remoteIP[] = "192.168.0.199"; // "192.168.0.199"; // REPLACE with your laptop's IP address on your team's router
+
 char ssid[] = "AI4CE_ARM";      // REPLACE with your team's router ssid
-char pass[] = "12345678"; //"gen9epoch8anise";// "12345678";          // REPLACE with your team's router password
-char remoteIP[] = "192.168.50.196"; //"192.168.1.182"; 
+char pass[] = "12345678";       // REPLACE with your team's router password
+char remoteIP[] = "192.168.50.196"; 
 unsigned int localPort = 4010;     // local port to listen on - no need to change
 unsigned int remotePort = 4010;    // local port to listen on - no need to change
 int status = WL_IDLE_STATUS;
@@ -106,10 +104,10 @@ void setup()
   reset_lidar_message();
 
   // Set up speed control
-	pinMode(RightMotorDirPin1, OUTPUT); 
-	pinMode(RightMotorDirPin2, OUTPUT); 
-	pinMode(LeftSpeedPin, OUTPUT);  
-	pinMode(LeftMotorDirPin1, OUTPUT);
+  pinMode(RightMotorDirPin1, OUTPUT); 
+  pinMode(RightMotorDirPin2, OUTPUT); 
+  pinMode(LeftSpeedPin, OUTPUT);  
+  pinMode(LeftMotorDirPin1, OUTPUT);
   pinMode(LeftMotorDirPin2, OUTPUT); 
   pinMode(RightSpeedPin, OUTPUT); 
   stop();
@@ -153,18 +151,22 @@ void reset_lidar_message()
 void stop()
 {
   digitalWrite(RightMotorDirPin1, LOW);
-  digitalWrite(RightMotorDirPin2,LOW);
-  digitalWrite(LeftMotorDirPin1,LOW);
-  digitalWrite(LeftMotorDirPin2,LOW);
+  digitalWrite(RightMotorDirPin2, LOW);
+  digitalWrite(LeftMotorDirPin1, LOW);
+  digitalWrite(LeftMotorDirPin2, LOW);
 }
 
 // Drive robot forward a desired speed
 void forward(int speed)
 {
-  digitalWrite(RightMotorDirPin1, HIGH);
-  digitalWrite(RightMotorDirPin2,LOW);
-  digitalWrite(LeftMotorDirPin1,HIGH);
-  digitalWrite(LeftMotorDirPin2,LOW);
+  digitalWrite(RightMotorDirPin1, LOW);
+  digitalWrite(RightMotorDirPin2, HIGH);
+  
+  // --- FIXED: Swapped HIGH/LOW for the Left Motor to reverse its direction ---
+  digitalWrite(LeftMotorDirPin1, HIGH);
+  digitalWrite(LeftMotorDirPin2, LOW);
+  // -------------------------------------------------------------------------
+  
   analogWrite(LeftSpeedPin, speed * 0.75);
   analogWrite(RightSpeedPin, speed);
 }
@@ -263,8 +265,6 @@ void send_sensor_signal(SensorSignal sensor_signal)
     msg = msg + String(current_num_lidar_rays);
     msg = msg + current_lidar_scan_data;
     reset_lidar_message();
-    //Serial.print("Sending msg: ");
-    //Serial.println(msg);
 
     Udp.beginPacket(remoteIP, remotePort);
     int   array_length  = msg.length()+1;

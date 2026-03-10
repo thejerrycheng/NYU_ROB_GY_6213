@@ -9,22 +9,17 @@ import cv2
 
 # Local libraries
 import parameters
-import data_handling
+import robot_python_code 
 
 # Helper function to make sure all angles are between -pi and pi
 def angle_wrap(angle):
-    while angle > math.pi:
-        angle -= 2*math.pi
-    while angle < -math.pi:
-        angle += 2*math.pi
+    while angle > math.pi: angle -= 2*math.pi
+    while angle < -math.pi: angle += 2*math.pi
     return angle
 
-# Helper class to store and manipulate your states.
 class State:
     def __init__(self, x, y, theta):
-        self.x = x
-        self.y = y
-        self.theta = theta
+        self.x, self.y, self.theta = x, y, theta
 
     def distance_to(self, other_state):
         return math.sqrt(math.pow(self.x - other_state.x, 2) + math.pow(self.y - other_state.y, 2))
@@ -34,207 +29,126 @@ class State:
 
     def deepcopy(self):
         return copy.deepcopy(self)
-        
-    def print(self):
-        print("State: ",self.x, self.y, self.theta)
 
-# Class to store walls as objects
 class Wall:
     def __init__(self, wall_corners):
         self.corner1 = State(wall_corners[0], wall_corners[1], 0)
         self.corner2 = State(wall_corners[2], wall_corners[3], 0)
-        self.corner1_mm = State(wall_corners[0] * 1000, wall_corners[1] * 1000, 0)
-        self.corner2_mm = State(wall_corners[2] * 1000, wall_corners[3] * 1000, 0)
-        
-        self.m = (wall_corners[3] - wall_corners[1])/(0.0001 + wall_corners[2] -  wall_corners[0])
-        self.b = wall_corners[3] - self.m * wall_corners[2]
-        self.b_mm =  wall_corners[3] * 1000 - self.m * wall_corners[2] * 1000
         self.length = self.corner1.distance_to(self.corner2)
-        self.length_mm_squared = self.corner1_mm.distance_to_squared(self.corner2_mm)
-        
-        if self.m > 1000:
-            self.vertical = True
-        else:
-            self.vertical = False
-        if abs(self.m) < 0.1:
-            self.horizontal = True
-        else:
-            self.horizontal = False
 
-# A class to store 2D maps
 class Map:
     def __init__(self, wall_corner_list):
-        self.wall_list = []
-        for wall_corners in wall_corner_list:
-            self.wall_list.append(Wall(wall_corners))
-        min_x = 999999
-        max_x = -99999
-        min_y = 999999
-        max_y = -99999
-        for wall in self.wall_list:
-            min_x = min(min_x, min(wall.corner1.x, wall.corner2.x))
-            max_x = max(max_x, max(wall.corner1.x, wall.corner2.x))
-            min_y = min(min_y, min(wall.corner1.y, wall.corner2.y))
-            max_y = max(max_y, max(wall.corner1.y, wall.corner2.y))
+        self.wall_list = [Wall(w) for w in wall_corner_list]
+            
+        min_x = min(min(w.corner1.x, w.corner2.x) for w in self.wall_list)
+        max_x = max(max(w.corner1.x, w.corner2.x) for w in self.wall_list)
+        min_y = min(min(w.corner1.y, w.corner2.y) for w in self.wall_list)
+        max_y = max(max(w.corner1.y, w.corner2.y) for w in self.wall_list)
+        
         border = 0.5
         self.plot_range = [min_x - border, max_x + border, min_y - border, max_y + border]
-        self.particle_range = [min_x , max_x , min_y, max_y]
+        self.particle_range = [min_x, max_x, min_y, max_y]
 
-    def closest_distance_to_walls(self, state):
-        closest_distance = 999999999999
-        for wall in self.wall_list:
-            closest_distance = self.get_distance_to_wall(state, wall, closest_distance)
-        return closest_distance
-        
-    def get_distance_to_wall(self, state, wall, closest_distance):
-        x0, y0 = state.x, state.y
-        vx, vy = math.cos(state.theta), math.sin(state.theta)
-        
-        x1, y1 = wall.corner1.x, wall.corner1.y
-        x2, y2 = wall.corner2.x, wall.corner2.y
-        
-        wx, wy = x2 - x1, y2 - y1
-        denominator = wx * vy - wy * vx
-        
-        if abs(denominator) < 1e-6:
-            return closest_distance 
-            
-        dx, dy = x1 - x0, y1 - y0
-        t = (dx * vy - dy * vx) / denominator
-        d = (dx * wy - dy * wx) / denominator
-        
-        if 0 <= t <= 1 and d > 0:
-            if d < closest_distance:
-                return d
-        return closest_distance
-
-# Class to hold a particle
 class Particle:
     def __init__(self):
         self.state = State(0, 0, 0)
         self.weight = 1.0
         
     def randomize_uniformly(self, xy_range):
-        x = random.uniform(xy_range[0], xy_range[1])
-        y = random.uniform(xy_range[2], xy_range[3])
-        theta = random.uniform(-math.pi, math.pi)
-        self.state = State(x, y, theta)
+        self.state = State(random.uniform(xy_range[0], xy_range[1]), 
+                           random.uniform(xy_range[2], xy_range[3]), 
+                           random.uniform(-math.pi, math.pi))
         self.weight = 1.0
 
     def randomize_around_initial_state(self, initial_state, state_stdev):
-        x = random.gauss(initial_state.x, state_stdev.x)
-        y = random.gauss(initial_state.y, state_stdev.y)
-        theta = angle_wrap(random.gauss(initial_state.theta, state_stdev.theta))
-        self.state = State(x, y, theta)
+        self.state = State(random.gauss(initial_state.x, state_stdev.x),
+                           random.gauss(initial_state.y, state_stdev.y),
+                           angle_wrap(random.gauss(initial_state.theta, state_stdev.theta)))
         self.weight = 1.0
         
-    def propagate_state(self, last_state, delta_encoder_counts, steering, delta_t):
+    def propagate_state(self, v_cmd, alpha_cmd, delta_t):
+        """EXACT logic from your original prediction script"""
         L = 0.145
-        KE_VALUE = 0.001345210  
+        V_M = 0.004808 
+        V_C = -0.045557 
+        VAR_V = 0.00057829 
         DELTA_COEFFS = [0.000027, 0.007798, 0.029847]
-        
-        # Keep noise high enough to help the filter recover from small errors
-        VAR_V = 0.00057829 * 1000
-        VAR_DELTA = 0.00023134 * 1000
+        VAR_DELTA = 0.00023134
 
-        # Force forward motion if encoders are reversed
-        delta_encoder_counts = abs(delta_encoder_counts)
+        # 1. Map Commands
+        v_physical = (V_M * v_cmd) + V_C
+        if v_physical < 0 and v_cmd > 0:
+            v_physical = 0.0 
 
-        ds = delta_encoder_counts * KE_VALUE
-        v_physical = (ds / delta_t) if delta_t > 0 else 0
+        delta_physical = DELTA_COEFFS[0]*(alpha_cmd**2) + DELTA_COEFFS[1]*alpha_cmd + DELTA_COEFFS[2]
         
-        # Stochastic inputs
-        v_s = v_physical + random.gauss(0, math.sqrt(VAR_V))
-        delta_det = DELTA_COEFFS[0]*(steering**2) + DELTA_COEFFS[1]*steering + DELTA_COEFFS[2]
-        d_s = delta_det + random.gauss(0, math.sqrt(VAR_DELTA))
+        # 2. Add Noise
+        if v_physical > 0:
+            v_physical += random.gauss(0, math.sqrt(VAR_V))
+            delta_physical += random.gauss(0, math.sqrt(VAR_DELTA))
+            
+        # 3. Kinematics
+        w = (v_physical * math.tan(delta_physical)) / L if L > 0 else 0.0
+            
+        # 4. Integration
+        self.state.x += (v_physical * math.cos(self.state.theta) * delta_t)
+        self.state.y += (v_physical * math.sin(self.state.theta) * delta_t)
+        self.state.theta = angle_wrap(self.state.theta - (w * delta_t))
         
-        # w_s is the angular velocity
-        w_s = (v_s * math.tan(d_s)) / L if abs(L) > 0 else 0
-        
-        # Integration
-        x = last_state.x + delta_t * v_s * math.cos(last_state.theta)
-        y = last_state.y + delta_t * v_s * math.sin(last_state.theta)
-        
-        # --- ROTATION DIRECTION FIX ---
-        # If your robot turns the WRONG way on screen, change this '+' to a '-' 
-        # or vice versa. Standard Cartesian is '+'.
-        theta = angle_wrap(last_state.theta + delta_t * w_s) 
-        
-        self.state = State(x, y, theta)
-        
-    def calculate_weight(self, lidar_signal, map):
-        """
-        Determines particle weight using Log-Likelihood to prevent math underflow.
-        Includes extrinsic calibration for Lidar-to-Robot transform.
-        """
-        # --- 1. Extrinsic Calibration (ADJUST THESE) ---
-        # Distance from robot center (rear axle) to Lidar turret in meters
-        X_OFFSET = 0.12  
-        # Angular offset if Lidar '0' isn't perfectly 'Front' (in Radians)
-        THETA_OFFSET = 0.0 
-        # 1.0 for Counter-Clockwise Lidar, -1.0 for Clockwise Lidar
-        POLARITY = 1.0   
-
+    def calculate_weight(self, lidar_signal, map_obj):
+        """EXACT cross-product line intersection using ALL 360 RAYS"""
         log_weight = 0.0
+        max_range = 5.0
         
-        # --- 2. Calculate Sensor Origin in Global Space ---
-        # The Lidar turret is not at the robot (x,y); it is offset along the heading.
-        xs = self.state.x + X_OFFSET * math.cos(self.state.theta)
-        ys = self.state.y + X_OFFSET * math.sin(self.state.theta)
-
-        # --- 3. Process Lidar Rays ---
-        # Subsample: Checking every 20th ray prevents "hyper-confidence" and saves CPU
-        ray_step = 20 
+        # --- CHANGED: Process every single ray in the Lidar array ---
+        ray_step = 1  
         
         for i in range(0, lidar_signal.num_lidar_rays, ray_step):
             raw_dist = lidar_signal.distances[i]
-            
-            # Hardware filter: ignore invalid/too-close readings
-            if raw_dist > 20: 
+            if raw_dist < 4900: # Assuming 5000 is error/max
                 measured_dist = lidar_signal.convert_hardware_distance(raw_dist)
+                relative_angle = lidar_signal.convert_hardware_angle(lidar_signal.angles[i])
                 
-                # Transform relative Lidar angle to Global Frame
-                ray_angle_rel = lidar_signal.convert_hardware_angle(lidar_signal.angles[i])
-                global_ray_angle = angle_wrap(
-                    self.state.theta - (POLARITY * ray_angle_rel) + THETA_OFFSET
-                )
+                # Reconstruct global ray angle
+                global_ray_angle = self.state.theta + relative_angle
+                rx = math.cos(global_ray_angle)
+                ry = math.sin(global_ray_angle)
+                min_distance = max_range
                 
-                # Create a temporary state for the Raycaster starting at the SENSOR origin
-                ray_origin_state = State(xs, ys, global_ray_angle)
-                expected_dist = map.closest_distance_to_walls(ray_origin_state)
-                
-                # --- 4. Weight Calculation (Log Space) ---
-                if expected_dist < 9999: # If ray hits a wall in the map
-                    # Gaussian Error: we add negative penalties (Log-Likelihood)
-                    # Instead of multiplying exp(), we add -(error^2 / 2*sigma^2)
-                    error = expected_dist - measured_dist
+                # Raycast against all walls using cross product
+                for wall in map_obj.wall_list:
+                    qx, qy = wall.corner1.x, wall.corner1.y
+                    bx, by = wall.corner2.x, wall.corner2.y
+                    sx = bx - qx
+                    sy = by - qy
                     
-                    # distance_variance should be ~0.05 to 0.2 depending on sensor noise
+                    r_cross_s = rx * sy - ry * sx
+                    if abs(r_cross_s) > 1e-6: 
+                        q_p_x = qx - self.state.x
+                        q_p_y = qy - self.state.y  
+                        t = (q_p_x * sy - q_p_y * sx) / r_cross_s 
+                        u = (q_p_x * ry - q_p_y * rx) / r_cross_s 
+                        if t > 0 and 0 <= u <= 1:
+                            if t < min_distance:
+                                min_distance = t
+                
+                # Weight calculation
+                if min_distance < max_range:
+                    error = min_distance - measured_dist
                     var = getattr(parameters, 'distance_variance', 0.1)
-                    log_weight += -(error**2) / (2 * var)
+                    # Scale penalty by 10 to keep particles alive with dense rays
+                    log_weight += -(error**2) / (2 * var * 10.0)
                 else:
-                    # Penalty for predicting "Infinity" when the sensor hit a wall
                     log_weight -= 5.0 
 
-        # --- 5. Final Normalization ---
-        # Convert back from Log space to [0, 1] weight
-        # 1e-11 is a floor to ensure the particle doesn't literally "die" and break the resampler
-        self.weight = math.exp(log_weight) + 1e-11
-
-    def gaussian(self, expected_distance, distance):
-        var = getattr(parameters, 'distance_variance', 0.05) 
-        return math.exp(-math.pow(expected_distance - distance, 2) / (2 * var))
+        self.weight = math.exp(log_weight) + 1e-15
 
     def deepcopy(self):
         return copy.deepcopy(self)
-        
-    def print(self):
-        print("Particle: ", self.state.x, self.state.y, self.state.theta, " w: ", self.weight)
 
 class ParticleSet:
     def __init__(self, num_particles, xy_range, initial_state, state_stdev, known_start_state):
         self.num_particles = num_particles
-        self.particle_list = []
         self.particle_range = xy_range
         if known_start_state:
             self.generate_initial_state_particles(initial_state, state_stdev)
@@ -246,187 +160,203 @@ class ParticleSet:
     def generate_uniform_random_particles(self, xy_range):
         self.particle_list = []
         for i in range(self.num_particles):
-            random_particle = Particle()
-            random_particle.randomize_uniformly(xy_range)
-            self.particle_list.append(random_particle)
+            p = Particle()
+            p.randomize_uniformly(xy_range)
+            self.particle_list.append(p)
 
     def generate_initial_state_particles(self, initial_state, state_stdev):
         self.particle_list = []
         for i in range(self.num_particles):
-            random_particle = Particle()
-            random_particle.randomize_around_initial_state(initial_state, state_stdev)
-            self.particle_list.append(random_particle)
+            p = Particle()
+            p.randomize_around_initial_state(initial_state, state_stdev)
+            self.particle_list.append(p)
 
     def resample(self, max_weight):
-        total_weight = sum(p.weight for p in self.particle_list)
-        if total_weight == 0 or max_weight == 0:
+        is_lost = max_weight < 1e-10
+        recovery_rate = 0.15 if is_lost else 0.02
+        
+        new_particles = []
+        num_to_resample = int(self.num_particles * (1.0 - recovery_rate))
+        
+        if max_weight == 0 or num_to_resample == 0:
             self.generate_uniform_random_particles(self.particle_range)
             return
-            
-        new_particles = []
+
         index = random.randint(0, self.num_particles - 1)
         beta = 0.0
         
-        for i in range(self.num_particles):
+        for i in range(num_to_resample):
             beta += random.uniform(0, 2.0 * max_weight)
             while beta > self.particle_list[index].weight:
                 beta -= self.particle_list[index].weight
                 index = (index + 1) % self.num_particles
             new_particles.append(self.particle_list[index].deepcopy())
             
+        while len(new_particles) < self.num_particles:
+            p = Particle()
+            p.randomize_uniformly(self.particle_range)
+            new_particles.append(p)
+            
         self.particle_list = new_particles
             
     def update_mean_state(self):
-        sum_x, sum_y = 0, 0
-        sum_sin_theta, sum_cos_theta = 0, 0
-        
-        for p in self.particle_list:
-            sum_x += p.state.x
-            sum_y += p.state.y
-            sum_sin_theta += math.sin(p.state.theta)
-            sum_cos_theta += math.cos(p.state.theta)
+        sum_x = sum(p.state.x for p in self.particle_list)
+        sum_y = sum(p.state.y for p in self.particle_list)
+        sum_sin = sum(math.sin(p.state.theta) for p in self.particle_list)
+        sum_cos = sum(math.cos(p.state.theta) for p in self.particle_list)
             
         self.mean_state.x = sum_x / self.num_particles
         self.mean_state.y = sum_y / self.num_particles
-        self.mean_state.theta = angle_wrap(math.atan2(sum_sin_theta, sum_cos_theta))
+        self.mean_state.theta = angle_wrap(math.atan2(sum_sin, sum_cos))
 
 class ParticleFilter:
-    def __init__(self, num_particles, map, initial_state, state_stdev, known_start_state, encoder_counts_0):
-        self.map = map
-        self.particle_set = ParticleSet(num_particles, map.particle_range, initial_state, state_stdev, known_start_state)
+    def __init__(self, num_particles, map_obj, initial_state, state_stdev, known_start_state):
+        self.map = map_obj
+        self.particle_set = ParticleSet(num_particles, map_obj.particle_range, initial_state, state_stdev, known_start_state)
         self.state_estimate = self.particle_set.mean_state
-        self.state_estimate_list = []
-        self.last_time = 0
-        self.last_encoder_counts = encoder_counts_0
 
-    def update(self, odometry_signal, measurement_signal, delta_t):
-        self.prediction(odometry_signal, delta_t)
-        
-        # --- FIXED: CORRECTION STEP UNCOMMENTED AND ACTIVE ---
+    def update(self, v_cmd, alpha_cmd, measurement_signal, delta_t):
+        self.prediction(v_cmd, alpha_cmd, delta_t)
         if hasattr(measurement_signal, 'angles') and len(measurement_signal.angles) > 0:
             self.correction(measurement_signal)
-            
         self.particle_set.update_mean_state()
-        self.state_estimate_list.append(self.state_estimate.deepcopy())
+        self.state_estimate = self.particle_set.mean_state.deepcopy()
 
-    def prediction(self, odometry_signal, delta_t):
-        encoder_counts = odometry_signal[0]
-        steering = odometry_signal[1]
-        
-        delta_encoder_counts = encoder_counts - self.last_encoder_counts
-        self.last_encoder_counts = encoder_counts
-        
+    def prediction(self, v_cmd, alpha_cmd, delta_t):
         for particle in self.particle_set.particle_list:
-            last_state = particle.state.deepcopy()
-            particle.propagate_state(last_state, delta_encoder_counts, steering, delta_t)
+            particle.propagate_state(v_cmd, alpha_cmd, delta_t)
         
     def correction(self, measurement_signal):
         for particle in self.particle_set.particle_list:
             particle.calculate_weight(measurement_signal, self.map)
-            
-        max_weight = max((particle.weight for particle in self.particle_set.particle_list), default=0)
+        max_weight = max((p.weight for p in self.particle_set.particle_list), default=0)
         self.particle_set.resample(max_weight)
-        
-    def print_state_estimate(self):
-        print("Mean state: ", self.particle_set.mean_state.x, self.particle_set.mean_state.y, self.particle_set.mean_state.theta)
 
 class ParticleFilterPlot:
-    def __init__(self, map, dataset_filepath):
-        self.dir_length = 0.1
-        self.fig, self.ax = plt.subplots()
-        self.map = map
+    def __init__(self, map_obj, dataset_filepath):
+        self.fig, self.ax = plt.subplots(figsize=(6, 6))
+        self.map = map_obj
+        self.video_filename = f"{os.path.splitext(os.path.basename(dataset_filepath))[0]}_pf_run.mp4"
+        self.video_writer = None 
         
-        # Extract the dataset name to use as the video filename
-        base_name = os.path.basename(dataset_filepath)
-        name_without_ext = os.path.splitext(base_name)[0]
-        self.video_filename = f"{name_without_ext}_pf_run.mp4"
-        
-        self.video_writer = None # Will be initialized on the first frame
+        self.gt_hist_x, self.gt_hist_y = [], []
+        self.est_hist_x, self.est_hist_y = [], []
 
-    def update(self, state_mean, particle_set, lidar_signal, hold_show_plot):
-        plt.clf()
+    def update(self, state_mean, particle_set, lidar_signal, gt_state, hold_show_plot, step):
+        self.ax.clear()
         
-        # 1. Plot Walls
+        self.gt_hist_x.append(gt_state.x)
+        self.gt_hist_y.append(gt_state.y)
+        self.est_hist_x.append(state_mean.x)
+        self.est_hist_y.append(state_mean.y)
+        
         for wall in self.map.wall_list:
-            plt.plot([wall.corner1.x, wall.corner2.x],[wall.corner1.y, wall.corner2.y],'k')
+            self.ax.plot([wall.corner1.x, wall.corner2.x], [wall.corner1.y, wall.corner2.y], 'k-', linewidth=2, zorder=1)
 
-        # 2. Plot Lidar
-        for i in range(len(lidar_signal.angles)):
-            distance = lidar_signal.convert_hardware_distance(lidar_signal.distances[i])
-            angle = lidar_signal.convert_hardware_angle(lidar_signal.angles[i]) + state_mean.theta
-            x_ray = [state_mean.x, state_mean.x + distance * math.cos(angle)]
-            y_ray = [state_mean.y, state_mean.y + distance * math.sin(angle)]
-            plt.plot(x_ray, y_ray, 'r')
+        x_particles = [p.state.x for p in particle_set.particle_list]
+        y_particles = [p.state.y for p in particle_set.particle_list]
+        self.ax.scatter(x_particles, y_particles, s=2, c='lime', alpha=0.15, zorder=2)
 
-        # 3. Plot State Estimate and Particles
-        plt.plot(state_mean.x, state_mean.y,'ro')
-        plt.plot([state_mean.x, state_mean.x+ self.dir_length*math.cos(state_mean.theta) ], [state_mean.y, state_mean.y+ self.dir_length*math.sin(state_mean.theta) ],'r')
-        x_particles, y_particles = self.to_plot_data(particle_set)
-        plt.plot(x_particles, y_particles, 'g.')
+        self.ax.plot(self.gt_hist_x, self.gt_hist_y, 'b-', linewidth=1.5, alpha=0.6, label="Ground Truth", zorder=3)
+        self.ax.plot(self.est_hist_x, self.est_hist_y, 'm--', linewidth=1.5, alpha=0.6, label="PF Estimate", zorder=4)
+
+        # --- CHANGED: Visualize all Lidar rays ---
         
-        plt.xlabel('X(m)')
-        plt.ylabel('Y(m)')
-        plt.axis(self.map.plot_range)
-        plt.grid()
+        ray_x, ray_y = [], []
+        if hasattr(lidar_signal, 'angles'):
+            for i in range(0, lidar_signal.num_lidar_rays, 1): 
+                raw_dist = lidar_signal.distances[i]
+                if raw_dist < 4900:
+                    dist = lidar_signal.convert_hardware_distance(raw_dist)
+                    angle = angle_wrap(lidar_signal.convert_hardware_angle(lidar_signal.angles[i]) + state_mean.theta)
+                    ray_x.extend([state_mean.x, state_mean.x + dist * math.cos(angle), None])
+                    ray_y.extend([state_mean.y, state_mean.y + dist * math.sin(angle), None])
+            self.ax.plot(ray_x, ray_y, color='red', alpha=0.15, linewidth=0.3, zorder=5)
 
-        # --- VIDEO RECORDING LOGIC ---
+        self.ax.plot(gt_state.x, gt_state.y, 'bo', markersize=6, zorder=6)
+        self.ax.quiver(gt_state.x, gt_state.y, math.cos(gt_state.theta), math.sin(gt_state.theta), color='blue', scale=15, width=0.007, zorder=7)
+        
+        self.ax.plot(state_mean.x, state_mean.y, 'mo', markersize=6, zorder=8)
+        self.ax.quiver(state_mean.x, state_mean.y, math.cos(state_mean.theta), math.sin(state_mean.theta), color='magenta', scale=15, width=0.007, zorder=9)
+        
+        self.ax.set_title(f"Offline PF Processing vs Ground Truth | Frame: {step}")
+        self.ax.set_xlim(self.map.plot_range[0], self.map.plot_range[1])
+        self.ax.set_ylim(self.map.plot_range[2], self.map.plot_range[3])
+        self.ax.set_aspect('equal')
+        self.ax.grid(True, linestyle='--', alpha=0.5)
+        self.ax.legend(loc='upper right', fontsize='x-small')
+
         self.fig.canvas.draw()
-        
         img_rgba = np.asarray(self.fig.canvas.buffer_rgba())
         img_bgr = cv2.cvtColor(img_rgba[:, :, :3], cv2.COLOR_RGB2BGR)
-        h, w, _ = img_bgr.shape
         
         if self.video_writer is None:
+            h, w, _ = img_bgr.shape
             fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
-            fps = 20.0 
-            self.video_writer = cv2.VideoWriter(self.video_filename, fourcc, fps, (w, h))
-            print(f"[Video] Started recording to: {self.video_filename}")
+            self.video_writer = cv2.VideoWriter(self.video_filename, fourcc, 20.0, (w, h))
             
         self.video_writer.write(img_bgr)
-        # -----------------------------
 
         if hold_show_plot:
             if self.video_writer is not None:
                 self.video_writer.release()
-                print(f"[Video] Successfully saved {self.video_filename}")
             plt.show()
         else:
-            plt.draw()
-            plt.pause(0.01)
-
-    def to_plot_data(self, particle_set):
-        x_list = []
-        y_list = []
-        for p in particle_set.particle_list:
-            x_list.append(p.state.x)
-            y_list.append(p.state.y)
-        return x_list, y_list
+            plt.pause(0.001)
 
 def offline_pf():
-    map = Map(parameters.wall_corner_list)
+    map_obj = Map(parameters.wall_corner_list)
     filename = './data/robot_data_0_0_25_02_26_21_41_33.pkl'
-    pf_data = data_handling.get_file_data_for_pf(filename)
-
-    particle_filter = ParticleFilter(parameters.num_particles, map, initial_state = State(0.5, 2.0, 1.57), state_stdev = State(0.1,0.1,0.1), known_start_state=True, encoder_counts_0=pf_data[0][2].encoder_counts)
-    particle_filter_plot = ParticleFilterPlot(map, filename)
-
-    for t in range(1, len(pf_data)):
-        row = pf_data[t]
+    
+    # Load data directly using DataLoader to bypass any array mismatch errors
+    data_dict = robot_python_code.DataLoader(filename).load()
+    time_list = data_dict['time']
+    control_list = data_dict['control_signal']
+    sensor_list = data_dict['robot_sensor_signal']
+    camera_list = data_dict.get('camera_sensor_signal', [])
+    
+    # Extract initial camera data for accurate PF initialization
+    if len(camera_list) > 0 and len(camera_list[0]) >= 6:
+        cam_0 = camera_list[0]
+        initial_gt_state = State(cam_0[0], cam_0[1], cam_0[5])
+    else:
+        initial_gt_state = State(0.5, 0.5, 1.57) # Safe fallback
         
-        delta_t_s = (pf_data[t][0] - pf_data[t-1][0]) / 1000.0 
-        
-        if delta_t_s <= 0:
-            continue
+    particle_filter = ParticleFilter(
+        parameters.num_particles, map_obj, 
+        initial_state=initial_gt_state, 
+        state_stdev=State(0.05, 0.05, 0.05),
+        known_start_state=True
+    )
+    
+    pf_plot = ParticleFilterPlot(map_obj, filename)
+
+    plt.ion()
+    last_gt_state = initial_gt_state 
+    
+    for t in range(1, len(time_list)):
+        delta_t_s = (time_list[t] - time_list[t-1]) / 1000.0 
+        if delta_t_s <= 0: continue
             
-        steering = getattr(row[2], 'steering', getattr(row[1], 'steering', 0))
+        # Extract Commands exactly as the prediction script expects
+        v_cmd = control_list[t][0]
+        alpha_cmd = control_list[t][1]
+        z_t = sensor_list[t]
         
-        u_t = np.array([row[2].encoder_counts, steering])
-        z_t = row[2] 
+        # Safely extract Camera Ground Truth 
+        if t < len(camera_list) and len(camera_list[t]) >= 6:
+            cam_t = camera_list[t]
+            last_gt_state = State(cam_t[0], cam_t[1], cam_t[5])
 
-        particle_filter.update(u_t, z_t, delta_t_s)
-        particle_filter_plot.update(particle_filter.particle_set.mean_state, particle_filter.particle_set, z_t, False)
+        # Step the filter using direct velocity and steering commands
+        particle_filter.update(v_cmd, alpha_cmd, z_t, delta_t_s)
+        
+        # Subsample visual rendering to speed up offline processing
+        if t % 3 == 0:
+            pf_plot.update(particle_filter.particle_set.mean_state, particle_filter.particle_set, z_t, last_gt_state, False, t)
 
-    particle_filter_plot.update(particle_filter.particle_set.mean_state, particle_filter.particle_set, z_t, True)
+    plt.ioff()
+    pf_plot.update(particle_filter.particle_set.mean_state, particle_filter.particle_set, z_t, last_gt_state, True, len(time_list))
 
 if __name__ == '__main__':
     offline_pf()
