@@ -1,0 +1,24 @@
+# simple_room.yaml — 4m × 3m rectangular room
+name: simple_room
+description: "A plain rectangular room 4m x 3m"
+
+robot_start:
+  x:     0.30
+  y:     0.20
+  theta: 1.5708   # pi/2 = facing +Y
+
+bounds:
+  x_min: -0.10
+  x_max:  4.10
+  y_min: -0.10
+  y_max:  3.10
+
+# Walls: each entry is [x1, y1, x2, y2] (metres)
+walls:
+  - [0.0, 0.0, 4.0, 0.0]   # bottom
+  - [4.0, 0.0, 4.0, 3.0]   # right
+  - [4.0, 3.0, 0.0, 3.0]   # top
+  - [0.0, 3.0, 0.0, 0.0]   # left
+
+# Obstacles: each entry is [cx, cy, half_w, half_h, height]
+obstacles: []

@@ -1,0 +1,32 @@
+# maze.yaml — small maze with corridors
+name: maze
+description: "A small maze with corridors and rooms"
+
+robot_start:
+  x:     0.30
+  y:     0.30
+  theta: 0.0
+
+bounds:
+  x_min: -0.10
+  x_max:  6.10
+  y_min: -0.10
+  y_max:  6.10
+
+walls:
+  # Outer boundary
+  - [0.0, 0.0, 6.0, 0.0]
+  - [6.0, 0.0, 6.0, 6.0]
+  - [6.0, 6.0, 0.0, 6.0]
+  - [0.0, 6.0, 0.0, 0.0]
+  # Inner walls
+  - [2.0, 0.0, 2.0, 2.0]
+  - [2.0, 3.0, 2.0, 6.0]
+  - [4.0, 0.0, 4.0, 1.0]
+  - [4.0, 2.0, 4.0, 4.0]
+  - [4.0, 5.0, 4.0, 6.0]
+  - [1.0, 3.0, 3.0, 3.0]
+  - [3.0, 4.0, 6.0, 4.0]
+
+obstacles:
+  - [5.0, 2.0, 0.3, 0.3, 0.3]   # [cx, cy, half_w, half_h, height]
