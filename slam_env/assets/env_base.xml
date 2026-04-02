@@ -1,0 +1,81 @@
+<!--
+  env_base.xml
+  ============
+  Static MuJoCo world settings: physics options, visual quality,
+  assets (textures/materials), lighting, cameras.
+
+  MapLoader reads this file and INCLUDES it via XML include or
+  inlines it as the template shell. All dynamic content (floor size,
+  walls, robot pose) is injected by MapLoader at load time.
+
+  Placeholders replaced by MapLoader:
+    {{CX}}   {{CY}}            — map centre x, y
+    {{FW}}   {{FH}}            — floor half-width, half-height
+    {{CD}}                     — camera distance (top-down)
+-->
+<mujoco model="slam_env">
+
+  <option timestep="0.02" integrator="Euler" gravity="0 0 -9.81"/>
+
+  <visual>
+    <headlight diffuse="0.8 0.8 0.8" ambient="0.5 0.5 0.5" specular="0 0 0"/>
+    <rgba haze="0.06 0.14 0.24 1"/>
+    <global offwidth="1280" offheight="960"/>
+    <quality shadowsize="2048"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient"
+             rgb1="0.70 0.82 1.0" rgb2="0.35 0.50 0.70"
+             width="512" height="512"/>
+    <texture name="floor_tex" type="2d" builtin="checker"
+             rgb1="0.78 0.78 0.78" rgb2="0.88 0.88 0.88"
+             width="512" height="512" mark="none"/>
+    <material name="floor_mat" texture="floor_tex"
+              texrepeat="6 6" reflectance="0.04" shininess="0.02"/>
+  </asset>
+
+  <worldbody>
+    <!-- Lighting: key + fill -->
+    <light name="sun" directional="true"
+           pos="{{CX}} {{CY}} 5.0" dir="-0.2 -0.2 -1"
+           diffuse="0.88 0.88 0.85" specular="0.15 0.15 0.12"
+           ambient="0.28 0.28 0.30" castshadow="true"/>
+    <light name="fill" directional="true"
+           pos="{{CX}} {{CY}} 3.0" dir="0.5 0.3 -1"
+           diffuse="0.30 0.30 0.32" specular="0 0 0"
+           ambient="0.08 0.08 0.10"/>
+
+    <!-- Floor — size injected by MapLoader -->
+    <geom name="floor" type="plane"
+          pos="{{CX}} {{CY}} 0"
+          size="{{FW}} {{FH}} 0.01"
+          material="floor_mat"
+          contype="1" conaffinity="1"
+          friction="0.5 0.05 0.01"/>
+
+    <!-- Walls injected here -->
+{{WALLS}}
+
+    <!-- Obstacles injected here -->
+{{OBSTACLES}}
+
+    <!-- Robot injected here -->
+{{ROBOT}}
+
+    <!-- Cameras -->
+    <camera name="top_down"
+            pos="{{CX}} {{CY}} {{CD}}"
+            xyaxes="1 0 0 0 1 0"/>
+    <camera name="follow_cam"
+            pos="{{CX}} {{CY}} {{CD_HALF}}"
+            xyaxes="1 0 0 0 0.5 1"/>
+  </worldbody>
+
+  <!-- Steer joint actuator -->
+  <actuator>
+    <position name="steer_act" joint="steer_joint"
+              kp="500" kv="50" forcerange="-50 50"/>
+  </actuator>
+
+</mujoco>

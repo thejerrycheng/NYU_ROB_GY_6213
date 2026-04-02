@@ -1,0 +1,156 @@
+<!--
+  robot.xml
+  =========
+  4-wheel Ackermann car body template.
+  All numeric values are PLACEHOLDERS replaced by MapLoader using the
+  dimensions from vehicle_config.yaml.
+
+  Coordinate frame
+    Origin  = rear-axle centre, z = ROBOT_JOINT_Z above floor
+    +X      = forward
+    +Y      = left
+    +Z      = up
+
+  Placeholders (all metres, replaced by MapLoader):
+    {{RX}} {{RY}} {{RZ_J}}  — robot start x, y, joint-z
+    {{THETA_DEG}}            — initial heading in degrees
+
+    {{CX_CH}}                — chassis-centre x in body frame  (= L/2)
+    {{CY_CH}}                — chassis-centre z in body frame
+    {{CY_WH}}                — wheel-centre z in body frame
+    {{CY_LID_MT}}            — lidar-mount z
+    {{CY_LID_DR}}            — lidar-drum z
+    {{CY_LID_SITE}}          — lidar-site z
+
+    {{COL_HX}} {{COL_HY}}   — collision half-extents x, y
+    {{VIS_HX}} {{VIS_HY}}   — visual chassis half-extents x, y
+    {{BODY_H2}}              — body half-height
+    {{ROOF_HX}}              — roof half-x
+    {{ROOF_HY}}              — roof half-y
+    {{ROOF_Z}}               — roof centre z
+
+    {{WR}}                   — wheel radius
+    {{WHW}}                  — wheel half-width
+    {{WY}}                   — wheel Y offset from centreline
+
+    {{L_WB}}                 — wheelbase (front axle x in body frame)
+    {{MAX_STEER_DEG}}        — steer joint range ±degrees
+
+    {{RGBA_CHASSIS}}  {{RGBA_ROOF}}
+    {{RGBA_WHEEL}}    {{RGBA_HUB}}      {{RGBA_AXLE}}
+    {{RGBA_BF}}       {{RGBA_BR}}
+    {{RGBA_LID_MT}}   {{RGBA_LID_DR}}
+--> 
+
+<body name="robot" pos="{{RX}} {{RY}} {{RZ_J}}" euler="0 0 {{THETA_DEG}}">
+  <freejoint name="robot_joint"/>
+
+  <!-- ── Collision box (invisible, covers full footprint) ── -->
+  <geom name="chassis_col" type="box"
+        pos="{{CX_CH}} 0 {{CY_CH}}"
+        size="{{COL_HX}} {{COL_HY}} {{BODY_H2}}"
+        rgba="0 0 0 0"
+        contype="1" conaffinity="1"
+        mass="0.001" friction="0.0 0.0 0.0"/>
+
+  <!-- ── Visual chassis ─────────────────────────────────── -->
+  <geom name="chassis_vis" type="box"
+        pos="{{CX_CH}} 0 {{CY_CH}}"
+        size="{{VIS_HX}} {{VIS_HY}} {{BODY_H2}}"
+        rgba="{{RGBA_CHASSIS}}"
+        contype="0" conaffinity="0" mass="1.0"/>
+
+  <!-- Roof panel -->
+  <geom name="roof" type="box"
+        pos="{{CX_CH}} 0 {{ROOF_Z}}"
+        size="{{ROOF_HX}} {{ROOF_HY}} 0.014"
+        rgba="{{RGBA_ROOF}}"
+        contype="0" conaffinity="0" mass="0"/>
+
+  <!-- Front bumper (yellow — direction indicator) -->
+  <geom name="bumper_front" type="box"
+        pos="{{BUMPER_FX}} 0 {{CY_CH}}"
+        size="0.008 {{VIS_HY}} {{BUMPER_H}}"
+        rgba="{{RGBA_BF}}"
+        contype="0" conaffinity="0" mass="0"/>
+
+  <!-- Rear bumper (red) -->
+  <geom name="bumper_rear" type="box"
+        pos="{{BUMPER_RX}} 0 {{CY_CH}}"
+        size="0.008 {{VIS_HY}} {{BUMPER_H}}"
+        rgba="{{RGBA_BR}}"
+        contype="0" conaffinity="0" mass="0"/>
+
+  <!-- ── Rear wheels (fixed) ────────────────────────────── -->
+  <geom name="wheel_rl" type="cylinder"
+        pos="0 {{WY}} {{CY_WH}}"
+        size="{{WR}} {{WHW}}" euler="90 0 0"
+        rgba="{{RGBA_WHEEL}}" contype="0" conaffinity="0" mass="0"/>
+  <geom name="wheel_rr" type="cylinder"
+        pos="0 -{{WY}} {{CY_WH}}"
+        size="{{WR}} {{WHW}}" euler="90 0 0"
+        rgba="{{RGBA_WHEEL}}" contype="0" conaffinity="0" mass="0"/>
+
+  <!-- Rear hub caps -->
+  <geom name="hub_rl" type="cylinder"
+        pos="0 {{HUB_Y}} {{CY_WH}}"
+        size="0.013 0.003" euler="90 0 0"
+        rgba="{{RGBA_HUB}}" contype="0" conaffinity="0" mass="0"/>
+  <geom name="hub_rr" type="cylinder"
+        pos="0 -{{HUB_Y}} {{CY_WH}}"
+        size="0.013 0.003" euler="90 0 0"
+        rgba="{{RGBA_HUB}}" contype="0" conaffinity="0" mass="0"/>
+
+  <!-- Rear axle bar -->
+  <geom name="axle_rear" type="cylinder"
+        pos="0 0 {{CY_WH}}"
+        size="0.007 {{WY}}" euler="90 0 0"
+        rgba="{{RGBA_AXLE}}" contype="0" conaffinity="0" mass="0"/>
+
+  <!-- ── Front steering sub-body ────────────────────────── -->
+  <body name="front_axle" pos="{{L_WB}} 0 {{CY_WH}}" euler="0 0 0">
+    <joint name="steer_joint" type="hinge" axis="0 0 1"
+           limited="true" range="-{{MAX_STEER_DEG}} {{MAX_STEER_DEG}}"
+           damping="100"/>
+
+    <!-- Front wheels -->
+    <geom name="wheel_fl" type="cylinder"
+          pos="0 {{WY}} 0"
+          size="{{WR}} {{WHW}}" euler="90 0 0"
+          rgba="{{RGBA_WHEEL}}" contype="0" conaffinity="0" mass="0"/>
+    <geom name="wheel_fr" type="cylinder"
+          pos="0 -{{WY}} 0"
+          size="{{WR}} {{WHW}}" euler="90 0 0"
+          rgba="{{RGBA_WHEEL}}" contype="0" conaffinity="0" mass="0"/>
+
+    <!-- Front hub caps -->
+    <geom name="hub_fl" type="cylinder"
+          pos="0 {{HUB_Y}} 0"
+          size="0.013 0.003" euler="90 0 0"
+          rgba="{{RGBA_HUB}}" contype="0" conaffinity="0" mass="0"/>
+    <geom name="hub_fr" type="cylinder"
+          pos="0 -{{HUB_Y}} 0"
+          size="0.013 0.003" euler="90 0 0"
+          rgba="{{RGBA_HUB}}" contype="0" conaffinity="0" mass="0"/>
+
+    <!-- Front axle bar -->
+    <geom name="axle_front" type="cylinder"
+          pos="0 0 0"
+          size="0.007 {{WY}}" euler="90 0 0"
+          rgba="{{RGBA_AXLE}}" contype="0" conaffinity="0" mass="0.001"/>
+  </body>
+
+  <!-- ── Lidar assembly ─────────────────────────────────── -->
+  <geom name="lidar_mount" type="cylinder"
+        pos="{{CX_CH}} 0 {{CY_LID_MT}}"
+        size="0.010 0.012"
+        rgba="{{RGBA_LID_MT}}" contype="0" conaffinity="0" mass="0"/>
+  <geom name="lidar_drum" type="cylinder"
+        pos="{{CX_CH}} 0 {{CY_LID_DR}}"
+        size="0.032 0.016"
+        rgba="{{RGBA_LID_DR}}" contype="0" conaffinity="0" mass="0.05"/>
+  <site name="lidar_site"
+        pos="{{CX_CH}} 0 {{CY_LID_SITE}}"
+        size="0.003"/>
+
+</body>

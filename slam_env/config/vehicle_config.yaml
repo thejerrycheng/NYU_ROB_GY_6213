@@ -1,0 +1,63 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# vehicle_config.yaml — Car motion model + physical dimensions
+#
+# Used by:
+#   utils/motion_model.py   → MotionModel, VehicleDynamics
+#   maps/map_loader.py      → robot geometry, collision extents
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Kinematic model ───────────────────────────────────────────────────────────
+kinematics:
+  wheelbase_m:      0.145     # L — rear-to-front axle distance [m]
+
+  # Velocity calibration:  v_phys = V_M * v_cmd + V_C  (forward)
+  velocity_gain:    0.004808  # V_M
+  velocity_offset: -0.045557  # V_C  (negative = deadband)
+
+  # Steering calibration (polynomial):
+  #   delta_rad = c0*alpha^2 + c1*alpha + c2
+  #   alpha is the raw steering command (dimensionless, ±100 range)
+  steering_poly:    [0.000027, 0.007798, 0.029847]   # [c0, c1, c2]
+
+  # Maximum steering angle [degrees] — limits the turning radius.
+  # Smaller value = gentler turns (larger radius).
+  # Larger value  = tighter turns (smaller radius).
+  # Physically: real servo hard-stop angle.
+  max_steer_deg:    35.0
+
+  # Process noise (for SLAM estimators — Gaussian std-devs)
+  noise_sigma_v:    0.024055  # sqrt(VAR_V)   [m/s]
+  noise_sigma_delta: 0.015209 # sqrt(VAR_DELTA) [rad]
+
+# ── Vehicle dynamics (inertia / teleop feel) ──────────────────────────────────
+dynamics:
+  mass_kg:          1.5       # total vehicle mass
+  tau_accel_s:      0.50      # motor time-constant while accelerating [s]
+  tau_brake_s:      0.25      # motor time-constant while decelerating [s]
+  mu_rolling:       0.02      # rolling-resistance coefficient
+  v_stop_eps:       0.0005    # speed [m/s] below which static friction holds
+
+# ── Physical dimensions (used to build the MuJoCo XML) ───────────────────────
+geometry:
+  body_length_m:    0.232     # chassis length  (1.6 × wheelbase)
+  body_width_m:     0.145     # chassis width   (1.0 × wheelbase)
+  body_height_m:    0.040     # chassis height
+  wheel_radius_m:   0.030
+  wheel_halfwidth_m: 0.009
+
+  # Collision half-extents (for Python OBB wall clamping).
+  # Set slightly larger than visual body to prevent clipping.
+  col_half_x_m:     0.120     # half-length of collision box
+  col_half_y_m:     0.092     # half-width  of collision box (includes wheels)
+
+# ── Visual / appearance ───────────────────────────────────────────────────────
+appearance:
+  chassis_rgba:     [0.12, 0.60, 0.12, 1.0]
+  roof_rgba:        [0.08, 0.45, 0.08, 1.0]
+  wheel_rgba:       [0.08, 0.08, 0.08, 1.0]
+  hub_rgba:         [0.60, 0.60, 0.60, 1.0]
+  axle_rgba:        [0.35, 0.35, 0.35, 1.0]
+  bumper_front_rgba: [0.70, 0.70, 0.10, 1.0]
+  bumper_rear_rgba: [0.70, 0.10, 0.10, 1.0]
+  lidar_mount_rgba: [0.25, 0.25, 0.25, 1.0]
+  lidar_drum_rgba:  [0.08, 0.08, 0.75, 1.0]
