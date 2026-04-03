@@ -37,6 +37,7 @@ V_STEP = 5.0
 ALPHA_STEP = 5.0      
 MAX_V_CMD = 100.0     
 MAX_ALPHA_CMD = 100.0
+ROBOT_RADIUS = 0.15   # Physical radius of the robot for collision
 
 # ==========================================
 # MAP LOADING LOGIC
@@ -47,11 +48,9 @@ def load_map(map_name):
         walls = map_module.wall_corner_list
         start_pose = getattr(map_module, "start_pose", [0.0, 0.0, 0.0])
         
-        # Calculate dynamic bounds for grid and plotting
         all_x = [w[0] for w in walls] + [w[2] for w in walls]
         all_y = [w[1] for w in walls] + [w[3] for w in walls]
         
-        # Add 1.5m padding around the map
         bounds = {
             'min_x': min(all_x) - 1.5,
             'max_x': max(all_x) + 1.5,
@@ -64,7 +63,7 @@ def load_map(map_name):
         exit(1)
 
 # ==========================================
-# 1. MOTION MODEL 
+# 1. MOTION MODEL & COLLISION
 # ==========================================
 def angle_wrap(angle):
     return (angle + math.pi) % (2 * math.pi) - math.pi
@@ -87,6 +86,26 @@ def predict_next_pose(current_pose, v_phys, delta_phys, delta_t=0.1):
     next_theta = angle_wrap(theta - (w * delta_t))
     return np.array([next_x, next_y, next_theta])
 
+def get_collision_info(target_x, target_y, walls, robot_radius):
+    """
+    🟢 REVISED: Returns (True, wall_segment) if collision happens, 
+    so we know WHICH wall to slide against.
+    """
+    for wall in walls:
+        qx, qy, bx, by = wall
+        px, py = bx - qx, by - qy
+        norm_sq = px*px + py*py
+        
+        u = ((target_x - qx) * px + (target_y - qy) * py) / float(norm_sq) if norm_sq > 0 else 0
+        u = max(min(u, 1.0), 0.0) 
+        
+        closest_x = qx + u * px
+        closest_y = qy + u * py
+        
+        dist = math.sqrt((target_x - closest_x)**2 + (target_y - closest_y)**2)
+        if dist <= robot_radius:
+            return True, wall 
+    return False, None
 
 # ==========================================
 # 2. EXTENDED KALMAN FILTER
@@ -119,7 +138,6 @@ class EKFPoseTracker:
         self.mu[2] = angle_wrap(self.mu[2])
         self.Sigma = (np.eye(3) - K @ H_t) @ self.Sigma
 
-
 # ==========================================
 # 3. DYNAMIC OCCUPANCY GRID MAPPER
 # ==========================================
@@ -127,7 +145,6 @@ class GridMapper:
     def __init__(self, bounds):
         self.offset_x = bounds['min_x']
         self.offset_y = bounds['min_y']
-        
         size_x = bounds['max_x'] - bounds['min_x']
         size_y = bounds['max_y'] - bounds['min_y']
         
@@ -191,7 +208,6 @@ class GridMapper:
     def get_probabilities(self):
         return 1.0 - (1.0 - (1.0 / (1.0 + np.exp(self.grid))))
 
-
 # ==========================================
 # 4. SENSOR MODEL & TELEOP LOGIC
 # ==========================================
@@ -241,14 +257,15 @@ def on_key_press(event):
         current_v_cmd = 0.0
         current_alpha_cmd = 0.0
 
-
 # ==========================================
 # 5. SIMULATION LOOP 
 # ==========================================
 def run_sim(map_name):
+    global current_v_cmd, current_alpha_cmd
     walls, start_pose, bounds = load_map(map_name)
     delta_t = 0.1 
     true_pose = np.array(start_pose)
+    is_crashed = False 
     
     ekf = EKFPoseTracker(true_pose)
     mapper = GridMapper(bounds)
@@ -263,20 +280,60 @@ def run_sim(map_name):
     fig2.canvas.mpl_connect('key_press_event', on_key_press) 
     
     cmap = LinearSegmentedColormap.from_list('grid_map', ['white', 'lightgrey', 'black'])
-    
     ekf_history_x, ekf_history_y = [ekf.mu[0]], [ekf.mu[1]]
     
     step = 0
     while plt.fignum_exists(fig1.number) and plt.fignum_exists(fig2.number):
         
         v_phys, delta_phys = get_physical_commands(current_v_cmd, current_alpha_cmd)
-        
         v_phys_noisy = v_phys + random.gauss(0, math.sqrt(VAR_V)) if v_phys != 0 else 0.0
         delta_phys_noisy = delta_phys + random.gauss(0, math.sqrt(VAR_DELTA)) if v_phys != 0 else 0.0
-        true_pose = predict_next_pose(true_pose, v_phys_noisy, delta_phys_noisy, delta_t)
         
+        # 1. Predict where the robot is trying to go
+        proposed_pose = predict_next_pose(true_pose, v_phys_noisy, delta_phys_noisy, delta_t)
+        
+        # 2. Check if that proposed move hits a wall
+        is_crashed, hit_wall = get_collision_info(proposed_pose[0], proposed_pose[1], walls, ROBOT_RADIUS)
+        
+        if is_crashed:
+            # 🟢 REVISED: SLIDING PHYSICS
+            qx, qy, bx, by = hit_wall
+            wall_vec = np.array([bx - qx, by - qy])
+            wall_len = np.linalg.norm(wall_vec)
+            
+            if wall_len > 0:
+                tangent = wall_vec / wall_len
+                
+                # The raw movement the robot wanted to make
+                disp = np.array([proposed_pose[0] - true_pose[0], proposed_pose[1] - true_pose[1]])
+                
+                # Project that movement onto the wall's tangent vector
+                slide_disp = np.dot(disp, tangent) * tangent
+                
+                # Apply the sliding displacement to form a new proposed position
+                proposed_pose[0] = true_pose[0] + slide_disp[0]
+                proposed_pose[1] = true_pose[1] + slide_disp[1]
+                
+                # Final Check: Does the sliding motion hit *another* wall? (e.g. hitting a corner)
+                is_crashed_again, _ = get_collision_info(proposed_pose[0], proposed_pose[1], walls, ROBOT_RADIUS)
+                
+                if is_crashed_again:
+                    # Trapped in a corner - stop movement completely
+                    proposed_pose = true_pose 
+                    current_v_cmd = 0.0
+            else:
+                proposed_pose = true_pose
+                current_v_cmd = 0.0
+                
+            true_pose = proposed_pose
+            
+        else:
+            true_pose = proposed_pose # Safe to move normally
+        
+        # SENSOR & SLAM UPDATES
         angles, distances = simulate_lidar_scan(true_pose[0], true_pose[1], true_pose[2], walls)
         
+        # Pass the commanded physics to EKF (It will accumulate error when sliding, which makes SLAM interesting!)
         ekf.predict(v_phys, delta_phys, delta_t)
         simulated_icp_measurement = true_pose + np.random.multivariate_normal([0, 0, 0], EKF_MEASUREMENT_NOISE)
         ekf.update(simulated_icp_measurement)
@@ -285,13 +342,20 @@ def run_sim(map_name):
         ekf_history_y.append(ekf.mu[1])
         mapper.update_map(ekf.mu, angles, distances)
         
+        # PLOTTING
         ax1.clear()
         for wall in walls:
             ax1.plot([wall[0], wall[2]], [wall[1], wall[3]], 'k-', linewidth=3)
         ax1.plot(true_pose[0], true_pose[1], 'go', markersize=8)
+        
+        circle = plt.Circle((true_pose[0], true_pose[1]), ROBOT_RADIUS, color='orange' if is_crashed else 'g', fill=False, linestyle=':')
+        ax1.add_patch(circle)
+        
         arrow_len = 0.2
         ax1.arrow(true_pose[0], true_pose[1], arrow_len*math.cos(true_pose[2]), arrow_len*math.sin(true_pose[2]), head_width=0.05, fc='g')
-        ax1.set_title(f"Ground Truth\nCmd V: {current_v_cmd} | Cmd Steer: {current_alpha_cmd}")
+        
+        status_text = "⚠️ SLIDING ALONG WALL" if is_crashed else f"Cmd V: {current_v_cmd} | Cmd Steer: {current_alpha_cmd}"
+        ax1.set_title(f"Ground Truth\n{status_text}", color='orange' if is_crashed else 'black')
         ax1.set_xlim(bounds['min_x'], bounds['max_x'])
         ax1.set_ylim(bounds['min_y'], bounds['max_y'])
         ax1.grid(True, linestyle='--', alpha=0.6)
