@@ -1,98 +1,47 @@
-# ══════════════════════════════════════════════════════════════════════════════
-# lidar_config.yaml — 2D LiDAR simulation parameters
-#
-# Calibrated to match an RPLidar A2 in a typical indoor environment.
-# Turn noise: false in sim_runner to see the clean reference scan alongside.
-# All units: metres, radians, seconds unless noted.
-# ══════════════════════════════════════════════════════════════════════════════
+# lidar_config.yaml
+# Simple, unbiased 2-D LiDAR noise model.
+# All noise is zero-mean Gaussian — no incidence scaling, no mixed-pixel.
 
-# ── Geometry ──────────────────────────────────────────────────────────────────
 geometry:
-  num_rays: 60 # beams per scan (1 deg resolution)
-  fov_deg: 360.0 # full 360° scan
-  start_angle_deg: 0.0 # first beam relative to robot heading
-  min_range: 0.1 # blind zone [m]  (RPLidar A2 ≈ 0.15m)
-  max_range: 1.0 # max sensing distance [m]
+  num_rays: 360
+  fov_deg: 360.0
+  start_angle_deg: 0.0
+  min_range: 0.15 # blind zone [m]
+  max_range: 5.0
 
-# ── Gaussian range noise ───────────────────────────────────────────────────────
-# RPLidar A2 datasheet: typical range error ±2cm, up to ±5cm at far range.
-# We model this as a range-dependent Gaussian:
-#   σ_eff = sigma_range × (1 + range_noise_k × r)
-# At r=0m:  σ = 0.020m (2cm)
-# At r=1m:  σ = 0.020 × (1 + 0.1×1) = 0.022m (2.2cm)
+# Additive Gaussian range noise — zero mean, symmetric
+# sigma_range: std-dev of range error [m]
+# range_dependent: noise grows slightly with distance
+# range_noise_k: extra fraction per metre (2% -> 1cm extra at 5m)
 gaussian_noise:
   enabled: true
-  sigma_range: 0.10 # [m]  base std-dev (RPLidar A2 ≈ 0.02m)
+  sigma_range: 0.020 # 2 cm std-dev at r=0
   range_dependent: true
-  range_noise_k: 0.05 # 5% extra σ per metre
+  range_noise_k: 0.02
 
-# ── Incidence-angle noise scaling ─────────────────────────────────────────────
-# At grazing angles (beam nearly parallel to surface), range noise amplifies.
-# Real effect: σ_eff ∝ 1/cos²(θ_inc). We cap at max_scale × base σ.
-# Visible as extra scatter near room corners and at acute wall angles.
-incidence_noise:
-  enabled: true
-  max_scale: 4.0 # max multiplier at extreme grazing (σ × 4)
-
-# ── Angular resolution uncertainty ────────────────────────────────────────────
-# RPLidar A2 angular resolution: ±0.33° typical.
-# Increases effective beam width — points scatter slightly around true bearing.
+# Per-beam angular jitter — models encoder/bearing error
 angular_noise:
   enabled: true
-  sigma_angle_deg: 0.33 # [deg]  per-beam angle jitter
+  sigma_angle_deg: 0.20 # 0.2 deg std-dev
 
-# ── Outliers ─────────────────────────────────────────────────────────────────
-# RPLidar A2 has notable outlier rate, especially:
-#   - Short returns near shiny/glass surfaces (cross-talk) ~1-2% of beams
-#   - Long (missed) returns on dark/absorptive surfaces    ~0.5% of beams
-# These rates are realistic for a budget lidar in real environments.
+# Short outliers — spurious near returns (glass, dust, cross-talk)
+# Drawn uniformly in [short_min_frac * true_range, true_range]
 outliers:
   enabled: true
+  short_prob: 0.008 # ~3 short outliers per 360-beam scan
+  short_min_frac: 0.10 # at least 10% of true range
 
-  # Short phantom returns — uniform in [min_range, true_range×short_min_frac..true_range]
-  short_prob: 0.012 # ~4-5 short outliers per 360-beam scan
-  short_min_frac: 0.05 # can be as close as 5% of true range
-
-  # Long missed-detection returns → reported as max_range
-  long_prob: 0.008 # ~3 long outliers per 360-beam scan
-
-# ── Mixed-pixel / beam-width effect ───────────────────────────────────────────
-# At depth discontinuities the finite beam width partially hits both surfaces.
-# Produces a spurious range between the near and far surface — common at corners.
-# blend_fraction = probability of occurrence given a large enough range jump.
-mixed_pixel:
-  enabled: true
-  jump_threshold: 0.15 # [m]  minimum range jump to trigger check
-  blend_fraction: 0.45 # 45% chance of mixed-pixel at a qualifying jump
-
-# ── Beam dropout ──────────────────────────────────────────────────────────────
-# Complete loss of return — dark surfaces, highly specular mirrors, fog.
-# Reports max_range (same as "no object detected").
+# Dropouts — complete loss of return -> max_range
+# Models dark/transparent surfaces
 dropout:
   enabled: true
-  prob: 0.004 # ~1-2 dropouts per 360-beam scan
+  prob: 0.003 # ~1 dropout per 360-beam scan
 
-# ── Motion blur (optional) ────────────────────────────────────────────────────
-# Moving robot smears the range slightly — proportional to rotational velocity.
-# Small effect at typical indoor speeds (0.1-0.3 m/s).
-motion_blur:
-  enabled: false # enable when robot is moving fast
-  sigma_m: 0.008 # [m]  range smear std-dev
-
-# ── Sensor update rate ────────────────────────────────────────────────────────
 scan_rate_hz: 10.0
 
-# ── Visualisation (MuJoCo user_scn) ──────────────────────────────────────────
+# MuJoCo viewer — red dots only
 visualization:
   enabled: true
-  beam_rgba: [0.0, 0.85, 0.85, 0.25] # cyan beams, semi-transparent
-  hit_rgba: [0.2, 0.95, 0.2, 0.90] # bright green hit dots
-  miss_rgba: [0.4, 0.4, 0.4, 0.08] # grey for no-hit beams
-  outlier_rgba: [1.0, 0.4, 0.0, 0.95] # orange outliers
-  beam_radius: 0.002 # thin beam capsule [m]
-  hit_radius: 0.010 # hit point sphere [m]
-  beam_height: 0.075 # scan plane Z above floor [m]
-  show_beams: true
-  show_hits: true
-  show_misses: false
+  beam_height: 0.15 # Z above floor [m]  (above chassis/walls)
+  hit_radius: 0.04 # sphere radius [m]  (visible from 4m camera)
   max_vis_beams: 360
