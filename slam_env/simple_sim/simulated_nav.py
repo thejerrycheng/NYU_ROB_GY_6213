@@ -28,46 +28,37 @@ VAR_V        = 0.00057829
 DELTA_COEFFS = [0.000027, 0.007798, 0.029847]
 VAR_DELTA    = 0.00023134
 VAR_LIDAR    = 0.000363
-ROBOT_RADIUS = 0.15
+
+# PHYSICAL & COLLISION BOUNDS
+ROBOT_RADIUS           = 0.15
+PLANNER_WALL_CLEARANCE = 0.25  
 
 LOOKAHEAD_DISTANCE = 0.4
 GOAL_TOLERANCE     = 0.20
 MAX_V_CMD          = 80.0
 MAX_ALPHA_CMD      = 100.0
 
-# ==========================================
-# PROBABILITY TRUTH TABLE
-# get_probabilities() = 1 / (1 + exp(grid)) = sigmoid(-grid)
-#
-#   grid =  0.0  (never visited)  -> prob = 0.500  -> GREY
-#   grid = -5.0  (free space)     -> prob = 0.993  -> BLACK
-#   grid = +5.0  (wall)           -> prob = 0.007  -> WHITE
-#
-#   is_free    = prob > 0.55
-#   is_unknown = 0.45 <= prob <= 0.55
-#   is_wall    = prob < 0.10
-# ==========================================
-
 PROB_FREE_THRESH  = 0.55
 PROB_UNKNOWN_LOW  = 0.45
 PROB_UNKNOWN_HIGH = 0.55
 PROB_WALL_THRESH  = 0.10
 
+RENDER_SKIP = 5 
 
 # ==========================================
 # MAP LOADING & MATH UTILS
 # ==========================================
 
 def get_naive_frontier_mask(mapper):
-    prob_grid = mapper.get_probabilities()
+    prob_grid  = mapper.get_probabilities()
     is_free    = prob_grid > PROB_FREE_THRESH
     is_unknown = (prob_grid >= PROB_UNKNOWN_LOW) & (prob_grid <= PROB_UNKNOWN_HIGH)
-    is_wall    = prob_grid < PROB_WALL_THRESH
+    is_wall    = prob_grid < 0.45
     has_unknown_neighbor = (
         np.roll(is_unknown, 1, axis=0) | np.roll(is_unknown, -1, axis=0) |
         np.roll(is_unknown, 1, axis=1) | np.roll(is_unknown, -1, axis=1)
     )
-    wall_buffer = binary_dilation(is_wall, iterations=3)
+    wall_buffer = binary_dilation(is_wall, iterations=4)
     return is_free & has_unknown_neighbor & ~wall_buffer
 
 
@@ -201,6 +192,8 @@ class GridMapper:
     def update_map(self, ego_pose, angles, distances, max_range=5.0):
         rx, ry, rtheta = ego_pose
         gx0, gy0 = self.world_to_grid(rx, ry)
+        PERSIST_THRESH = 1.5
+
         for i in range(len(angles)):
             dist       = distances[i]
             glob_angle = rtheta + angles[i]
@@ -213,12 +206,12 @@ class GridMapper:
                     if j == len(cells) - 1 and dist < (max_range - 0.1):
                         self.grid[cx, cy] += L_OCC
                     else:
-                        self.grid[cx, cy] += L_FREE
+                        if self.grid[cx, cy] < PERSIST_THRESH:
+                            self.grid[cx, cy] += L_FREE
                     self.grid[cx, cy] = np.clip(
                         self.grid[cx, cy], MIN_LOG_ODDS, MAX_LOG_ODDS)
 
     def get_probabilities(self):
-        # sigmoid(-grid): free(neg grid)->high prob, wall(pos)->low, unknown(0)->0.5
         return 1.0 / (1.0 + np.exp(self.grid))
 
 
@@ -231,74 +224,32 @@ class ActiveSLAMController:
         self.mapper          = mapper
         self.current_path    = []
         self.target_frontier = None
+        self.step_counter    = 0
+        self.cached_inflated = None
 
-        # ------------------------------------------------------------------
-        # Low-level PD controller — same dual-loop design as the proven
-        # hardware PDPositionController.
-        #
-        # STEERING LOOP  →  alpha_cmd
-        #   Measured state : EKF heading  rtheta
-        #   Desired state  : angle to current waypoint  atan2(dy, dx)
-        #   error          : heading_err = desired - measured  [rad, wrapped]
-        #   output         : KP_steer * heading_err + KD_steer * d(err)/dt
-        #   clamp          : [-MAX_ALPHA_CMD, +MAX_ALPHA_CMD]
-        #
-        # SPEED LOOP  →  v_cmd
-        #   Measured state : EKF position
-        #   Desired state  : current waypoint position
-        #   error          : dist = hypot(dx, dy)  [m]
-        #   output         : KP_speed * dist
-        #   clamp          : [MIN_V_CMD, MAX_V_CMD]
-        #   dead-band      : dist < WP_REACH_DIST  → advance to next waypoint
-        #
-        # PHASE LOGIC  (align-first, identical to hardware):
-        #   |heading_err| > ALIGN_THRESHOLD  →  v_cmd = 0  (rotate in place)
-        #   |heading_err| ≤ ALIGN_THRESHOLD  →  both loops active
-        #
-        # Gains are scaled from the hardware values
-        # (hardware steer range [-20,20]; here [-100,100] → ×5):
-        #   KP_steer  hardware=8.0   →  here=40.0
-        #   KD_steer  hardware=1.2   →  here=6.0
-        #   KP_speed  hardware=60.0  →  here=60.0  (same speed range 0-80)
-        # ------------------------------------------------------------------
+        self.blacklisted_frontiers = []
+        self.recovery_steps        = 0
 
-        # Steering PD
         self.KP_steer = 40.0
         self.KD_steer =  6.0
+        self.KP_speed  = 100.0  
+        self.MIN_V_CMD = 40.0   
 
-        # Speed P
-        self.KP_speed  = 60.0
-        self.MIN_V_CMD = 100.0   # hard floor — robot moves at speed
+        self.ALIGN_THRESHOLD = 0.20          
+        self.WP_REACH_DIST   = 0.30   
 
-        # Thresholds
-        self.ALIGN_THRESHOLD = 0.20          # rad  — rotate-in-place until within this
-        self.WP_REACH_DIST   = 0.30   # m — matches subsampled waypoint spacing
-
-        # Derivative state — reset whenever goal changes
         self.prev_heading_err = 0.0
+        self.stuck_check_pose = None
+        self.stuck_timer      = 0      
+        self.STUCK_CHECK_STEPS = 30     
+        self.STUCK_DIST_MIN    = 0.05   
 
-        # Stuck detection
-        self.stuck_check_pose  = None   # [x, y] snapshot
-        self.stuck_timer       = 0      # steps since last snapshot
-        self.STUCK_CHECK_STEPS = 30     # check every 3 s (at 10 Hz)
-        self.STUCK_DIST_MIN    = 0.05   # m — must have moved this far
-
-    # ------------------------------------------------------------------
     def _reset_pd(self):
         self.prev_heading_err = 0.0
         self.stuck_check_pose = None
         self.stuck_timer      = 0
 
-    # ------------------------------------------------------------------
     def _subsample_path(self, path, step_m=0.25):
-        """
-        Reduce waypoint density to one point every step_m metres.
-        A* on a 5cm grid produces waypoints every 5-7cm — far too many.
-        Keeping only every ~5th waypoint (0.25m spacing) means:
-          - fewer align-then-drive cycles per trip  →  much faster overall
-          - WP_REACH_DIST of 0.30m still comfortably catches each waypoint
-        The final waypoint (frontier goal) is always preserved.
-        """
         if len(path) <= 2:
             return path
         subsampled = [path[0]]
@@ -311,17 +262,20 @@ class ActiveSLAMController:
                 subsampled.append(path[i])
                 accumulated = 0.0
         if subsampled[-1] != path[-1]:
-            subsampled.append(path[-1])   # always keep the goal
+            subsampled.append(path[-1])   
         return subsampled
 
-    # ------------------------------------------------------------------
     def get_inflated_obstacles(self):
-        prob_grid   = self.mapper.get_probabilities()
-        is_obstacle = prob_grid < PROB_WALL_THRESH      # walls = LOW prob
-        inflation_cells = int(ROBOT_RADIUS / GRID_RESOLUTION)
-        return binary_dilation(is_obstacle, iterations=inflation_cells)
+        prob_grid = self.mapper.get_probabilities()
+        confirmed_wall = prob_grid < 0.20
+        probable_wall  = prob_grid < 0.40
 
-    # ------------------------------------------------------------------
+        confirmed_inflation = int((ROBOT_RADIUS + PLANNER_WALL_CLEARANCE) / GRID_RESOLUTION)
+        probable_inflation  = int(ROBOT_RADIUS / GRID_RESOLUTION)
+
+        return (binary_dilation(confirmed_wall, iterations=confirmed_inflation) |
+                binary_dilation(probable_wall,  iterations=probable_inflation))
+
     def find_frontiers(self, inflated_obstacles):
         prob_grid  = self.mapper.get_probabilities()
         is_free    = prob_grid > PROB_FREE_THRESH
@@ -332,7 +286,6 @@ class ActiveSLAMController:
         frontier_pixels  = np.argwhere(frontier_grid)
 
         if len(frontier_pixels) == 0:
-            print("[Frontiers] No frontier pixels found.")
             return []
 
         sampled    = frontier_pixels[::8]
@@ -346,11 +299,8 @@ class ActiveSLAMController:
             wx, wy = self.mapper.grid_to_world(gx, gy)
             candidates.append((wx, wy))
 
-        print(f"[Frontiers] {len(candidates)} candidates "
-              f"from {len(frontier_pixels)} raw pixels")
         return candidates
 
-    # ------------------------------------------------------------------
     def is_kinematically_reachable(self, robot_pose, goal_pos):
         rx, ry, rtheta = robot_pose
         gx, gy = goal_pos
@@ -375,7 +325,6 @@ class ActiveSLAMController:
                 return False
         return True
 
-    # ------------------------------------------------------------------
     def a_star_plan(self, start_pose, goal_world, inflated_obstacles):
         sgx, sgy = self.mapper.world_to_grid(start_pose[0], start_pose[1])
         ggx, ggy = self.mapper.world_to_grid(goal_world[0], goal_world[1])
@@ -383,7 +332,6 @@ class ActiveSLAMController:
         if not (0 <= ggx < self.mapper.W and 0 <= ggy < self.mapper.H):
             return []
 
-        # Snap blocked goal to nearest free cell
         if inflated_obstacles[ggx, ggy]:
             found = False
             for radius in range(1, 20):
@@ -401,7 +349,6 @@ class ActiveSLAMController:
             if not found:
                 return []
 
-        # Clear start bubble so robot can always leave
         safe = inflated_obstacles.copy()
         for dx in range(-4, 5):
             for dy in range(-4, 5):
@@ -436,141 +383,172 @@ class ActiveSLAMController:
                         heapq.heappush(open_set, (f, nb))
         return []
 
-    # ------------------------------------------------------------------
+    def local_planner_check(self, robot_pose, inflated_obstacles):
+        rx, ry, rtheta = robot_pose
+
+        CHECK_WPS = min(8, len(self.current_path))
+        for wp in self.current_path[:CHECK_WPS]:
+            gx, gy = self.mapper.world_to_grid(wp[0], wp[1])
+            if (0 <= gx < self.mapper.W and 0 <= gy < self.mapper.H
+                    and inflated_obstacles[gx, gy]):
+                self.current_path    = []
+                self.target_frontier = None
+                self._reset_pd()
+                return True
+
+        NUM_PROBE = 8
+        for k in range(1, NUM_PROBE + 1):
+            probe_dist = (LOOKAHEAD_DISTANCE / NUM_PROBE) * k
+            px = rx + probe_dist * math.cos(rtheta)
+            py = ry + probe_dist * math.sin(rtheta)
+            gx, gy = self.mapper.world_to_grid(px, py)
+            if (0 <= gx < self.mapper.W and 0 <= gy < self.mapper.H
+                    and inflated_obstacles[gx, gy]):
+                self.current_path    = []
+                self.target_frontier = None
+                self._reset_pd()
+                return True
+
+        return False
+
     def pd_controller(self, robot_pose, dt=0.1):
-        """
-        Dual-loop PD controller for Ackermann drive.
-
-        Key design decision: NO align-first / stop-to-turn logic.
-        Align-first causes the robot to stop whenever heading_err drifts
-        above threshold (which happens constantly mid-path on curves),
-        leading to oscillation and getting stuck.
-
-        Instead: always drive forward at MIN_V_CMD floor, steer
-        simultaneously.  Speed scales up with distance to waypoint so
-        the robot naturally slows as it approaches each one.
-
-        Measured state : EKF pose [x, y, theta]
-        Desired state  : current subsampled A* waypoint
-        """
         if not self.current_path:
             return 0.0, 0.0
 
         rx, ry, rtheta = robot_pose
 
-        # ── Stuck detection ──────────────────────────────────────────────
         self.stuck_timer += 1
         if self.stuck_check_pose is None:
             self.stuck_check_pose = [rx, ry]
         elif self.stuck_timer >= self.STUCK_CHECK_STEPS:
             moved = math.hypot(rx - self.stuck_check_pose[0],
                                ry - self.stuck_check_pose[1])
+            
             if moved < self.STUCK_DIST_MIN:
-                print("[PD] Stuck detected — clearing path to force replan.")
+                print(f"[PD] Stuck! Blacklisting frontier and reversing.")
+                if self.target_frontier:
+                    self.blacklisted_frontiers.append(self.target_frontier)
+                
                 self.current_path    = []
                 self.target_frontier = None
                 self._reset_pd()
-                return 0.0, 0.0
+                
+                self.recovery_steps = 8 
+                return -self.MIN_V_CMD, 0.0
+
             self.stuck_check_pose = [rx, ry]
             self.stuck_timer      = 0
 
-        # ── Smart waypoint selection ─────────────────────────────────────
-        # 1. Find the index of the closest waypoint on the entire remaining path.
-        # 2. Discard everything before it — robot cannot go backwards.
-        # 3. Then look one step ahead of that closest point so the robot
-        #    always has forward progress as its target, not a point it
-        #    may already be alongside or past.
-        # This means the robot never gets stuck trying to reverse-arc back
-        # to a waypoint it has already passed.
         dists = [math.hypot(p[0] - rx, p[1] - ry) for p in self.current_path]
         closest_idx = int(np.argmin(dists))
 
-        # Prune everything before the closest point
         if closest_idx > 0:
             self.current_path = self.current_path[closest_idx:]
 
-        # Look one waypoint ahead of closest so we always aim forward
         lookahead_idx = min(1, len(self.current_path) - 1)
         wp_x, wp_y = self.current_path[lookahead_idx]
 
-        # ── STEERING LOOP ────────────────────────────────────────────────
         desired_heading = math.atan2(wp_y - ry, wp_x - rx)
         heading_err     = angle_wrap(desired_heading - rtheta)
 
         d_heading = (heading_err - self.prev_heading_err) / dt if dt > 0 else 0.0
         self.prev_heading_err = heading_err
 
-        # Sign convention:
-        # predict_next_pose: theta -= w*dt, w = v*tan(delta)/L
-        # So positive delta → robot turns RIGHT (theta decreases)
-        # positive heading_err → goal is to the LEFT → need negative delta
-        # → negate the PD output so positive error → negative alpha_cmd
         alpha_cmd = float(np.clip(
             -(self.KP_steer * heading_err + self.KD_steer * d_heading),
             -MAX_ALPHA_CMD, MAX_ALPHA_CMD
         ))
 
-        # ── SPEED LOOP ───────────────────────────────────────────────────
-        # Scale speed with distance — far away: fast, close: slow.
-        # Hard floor of MIN_V_CMD (40) so robot always moves forward.
-        # No stop-to-turn: Ackermann steers by driving, not spinning.
-        dist = math.hypot(wp_x - rx, wp_y - ry)
-        v_cmd = float(np.clip(
-            self.KP_speed * dist,
-            self.MIN_V_CMD, MAX_V_CMD
-        ))
+        dist_to_final = math.hypot(self.current_path[-1][0] - rx, self.current_path[-1][1] - ry)
+        base_v_cmd = MAX_V_CMD if dist_to_final > 0.5 else float(np.clip(self.KP_speed * dist_to_final, self.MIN_V_CMD, MAX_V_CMD))
+        
+        if abs(heading_err) > 0.35:
+            v_cmd = max(self.MIN_V_CMD, base_v_cmd * 0.5)
+        else:
+            v_cmd = base_v_cmd
 
         return v_cmd, alpha_cmd
 
-    # ------------------------------------------------------------------
     def update(self, robot_pose):
-        inflated_obstacles = self.get_inflated_obstacles()
+        self.step_counter += 1
+        
+        if self.recovery_steps > 0:
+            self.recovery_steps -= 1
+            return -self.MIN_V_CMD, 0.0
 
-        # Check arrival at current frontier
+        if self.cached_inflated is None or self.step_counter % 5 == 0:
+            self.cached_inflated = self.get_inflated_obstacles()
+        inflated_obstacles = self.cached_inflated
+
         if self.target_frontier is not None:
             dist_to_goal = math.hypot(
                 self.target_frontier[0] - robot_pose[0],
                 self.target_frontier[1] - robot_pose[1])
             if dist_to_goal < GOAL_TOLERANCE * 2:
-                print(f"[Nav] Arrived at {self.target_frontier} — selecting next frontier.")
+                if self.blacklisted_frontiers:
+                    print("[Nav] Reached goal, clearing frontier blacklist.")
+                    self.blacklisted_frontiers.clear()
                 self.target_frontier = None
                 self.current_path    = []
                 self._reset_pd()
 
-        # Follow existing path
         if self.current_path and self.target_frontier is not None:
-            return self.pd_controller(robot_pose)
+            if self.local_planner_check(robot_pose, inflated_obstacles):
+                pass  
+            else:
+                return self.pd_controller(robot_pose)
 
-        # Path ran out but not arrived — replan to same frontier
         if self.target_frontier is not None and not self.current_path:
             path = self.a_star_plan(robot_pose, self.target_frontier, inflated_obstacles)
             if path:
                 self.current_path = self._subsample_path(path)
                 self._reset_pd()
-                print(f"[Nav] Replanned to existing frontier {self.target_frontier} "
-                      f"({len(self.current_path)} waypoints after subsampling)")
                 return self.pd_controller(robot_pose)
             else:
-                print("[Nav] Frontier unreachable — picking new one.")
                 self.target_frontier = None
 
-        # Pick a new frontier
         candidates = self.find_frontiers(inflated_obstacles)
+        
+        # ==============================================================
+        # FIX: STARTUP GUARD
+        # Prevents the robot from instantly terminating at tick 0 before 
+        # the LiDAR has painted the initial map into the grid.
+        # ==============================================================
         if not candidates:
-            print("Exploration Complete: No frontier pixels found.")
-            return 0.0, 0.0
+            if self.step_counter < 30: # 3 seconds at 10Hz
+                return self.MIN_V_CMD, 0.0 # Drive straight slightly to see
+            else:
+                return None, None # Truly finished
 
-        feasible = [c for c in candidates
-                    if self.is_kinematically_reachable(robot_pose, c)]
+        feasible = []
+        for c in candidates:
+            is_blacklisted = any(math.hypot(c[0]-b[0], c[1]-b[1]) < 1.0 for b in self.blacklisted_frontiers)
+            if is_blacklisted:
+                continue
+            if self.is_kinematically_reachable(robot_pose, c):
+                feasible.append(c)
+
+        # ==============================================================
+        # FIX: BLACKLIST FORGIVENESS
+        # If the only frontiers left are blacklisted, wipe the slate clean
+        # and try them again as a final attempt to finish the map.
+        # ==============================================================
+        if not feasible and candidates and self.blacklisted_frontiers:
+            print("[Nav] All remaining frontiers blacklisted. Clearing blacklist for final sweep.")
+            self.blacklisted_frontiers.clear()
+            feasible = [c for c in candidates if self.is_kinematically_reachable(robot_pose, c)]
+
         if not feasible:
-            print("[Warn] Relaxing kinematic constraint — using all candidates")
             feasible = candidates
 
-        # Always target the furthest reachable frontier
-        feasible_sorted = sorted(
-            feasible,
-            key=lambda c: math.hypot(c[0] - robot_pose[0], c[1] - robot_pose[1]),
-            reverse=True)
+        def frontier_cost(c):
+            dist = math.hypot(c[0] - robot_pose[0], c[1] - robot_pose[1])
+            angle_to_goal = math.atan2(c[1] - robot_pose[1], c[0] - robot_pose[0])
+            heading_diff  = abs(angle_wrap(angle_to_goal - robot_pose[2]))
+            heading_penalty = 1.5 * heading_diff 
+            return dist + heading_penalty
+
+        feasible_sorted = sorted(feasible, key=frontier_cost)
 
         for goal in feasible_sorted:
             path = self.a_star_plan(robot_pose, goal, inflated_obstacles)
@@ -578,44 +556,54 @@ class ActiveSLAMController:
                 self.target_frontier = goal
                 self.current_path    = self._subsample_path(path)
                 self._reset_pd()
-                dist = math.hypot(goal[0] - robot_pose[0], goal[1] - robot_pose[1])
-                print(f"[Nav] New frontier {goal}, dist={dist:.2f}m, "
-                      f"{len(self.current_path)} waypoints (subsampled from {len(path)})")
                 return self.pd_controller(robot_pose)
 
-        print(f"[Warn] {len(feasible_sorted)} candidates but none reachable via A*")
         return 0.0, 0.0
 
 
 # ==========================================
-# SENSOR SIMULATION & MAIN LOOP
+# VECTORIZED SENSOR SIMULATION
 # ==========================================
 
 def simulate_lidar_scan(robot_x, robot_y, robot_theta, walls):
     num_rays  = 180
     max_range = 5.0
     sigma_z   = math.sqrt(VAR_LIDAR)
-    angles, distances = [], []
-    ray_angles = np.linspace(0, 2 * math.pi, num_rays, endpoint=False)
-    for rel_ang in ray_angles:
-        glob_ang = robot_theta + rel_ang
-        rx, ry   = math.cos(glob_ang), math.sin(glob_ang)
-        min_dist = max_range
-        for wall in walls:
-            qx, qy, bx, by = wall
-            sx, sy    = bx - qx, by - qy
-            r_cross_s = rx * sy - ry * sx
-            if abs(r_cross_s) > 1e-6:
-                qpx, qpy = qx - robot_x, qy - robot_y
-                t = (qpx * sy - qpy * sx) / r_cross_s
-                u = (qpx * ry - qpy * rx) / r_cross_s
-                if t > 0 and 0 <= u <= 1 and t < min_dist:
-                    min_dist = t
-        if min_dist < max_range:
-            min_dist = max(0.0, min_dist + random.gauss(0, sigma_z))
-        angles.append(rel_ang)
-        distances.append(min_dist)
-    return angles, distances
+    
+    angles = np.linspace(0, 2 * math.pi, num_rays, endpoint=False)
+    glob_angles = robot_theta + angles
+    rx = np.cos(glob_angles)
+    ry = np.sin(glob_angles)
+    
+    if not walls:
+        return angles.tolist(), np.clip(np.full(num_rays, max_range) + np.random.normal(0, sigma_z, num_rays), 0, max_range).tolist()
+        
+    walls_arr = np.array(walls)
+    qx, qy, bx, by = walls_arr.T
+    sx, sy = bx - qx, by - qy
+    
+    r_cross_s = np.outer(rx, sy) - np.outer(ry, sx)
+    valid = np.abs(r_cross_s) > 1e-6
+    
+    qpx = qx - robot_x
+    qpy = qy - robot_y
+    
+    t_num = np.outer(np.ones(num_rays), qpx * sy - qpy * sx)
+    t = np.divide(t_num, r_cross_s, out=np.inf * np.ones_like(r_cross_s), where=valid)
+    
+    u_num = qpx * ry[:, np.newaxis] - qpy * rx[:, np.newaxis]
+    u = np.divide(u_num, r_cross_s, out=np.inf * np.ones_like(r_cross_s), where=valid)
+    
+    hit = valid & (t > 0) & (u >= 0) & (u <= 1)
+    t_hit = np.where(hit, t, np.inf)
+    min_t = np.min(t_hit, axis=1)
+    
+    distances = np.minimum(min_t, max_range)
+    hit_mask = distances < max_range
+    distances[hit_mask] += np.random.normal(0, sigma_z, np.sum(hit_mask))
+    distances = np.clip(distances, 0, max_range)
+    
+    return angles.tolist(), distances.tolist()
 
 
 def run_sim(map_name):
@@ -642,6 +630,13 @@ def run_sim(map_name):
 
         # A. AI DECISION
         v_cmd, alpha_cmd = ai_controller.update(ekf.mu)
+        
+        if v_cmd is None:
+            print("\n=======================================================")
+            print(" EXPLORATION COMPLETE! ")
+            print(" No frontier points left. Close the plot windows to exit.")
+            print("=======================================================\n")
+            break 
 
         # B. KINEMATICS
         v_phys, delta_phys = get_physical_commands(v_cmd, alpha_cmd)
@@ -651,7 +646,6 @@ def run_sim(map_name):
                    if v_phys != 0 else 0.0)
         proposed = predict_next_pose(true_pose, v_noisy, d_noisy, delta_t)
 
-        # Collision + wall sliding
         crashed, hit_wall = get_collision_info(
             proposed[0], proposed[1], walls, ROBOT_RADIUS)
         if crashed:
@@ -682,57 +676,61 @@ def run_sim(map_name):
         ekf_history_x.append(ekf.mu[0])
         ekf_history_y.append(ekf.mu[1])
 
-        # D. GROUND TRUTH WINDOW
-        ax1.clear()
-        for wall in walls:
-            ax1.plot([wall[0], wall[2]], [wall[1], wall[3]], 'k-', linewidth=3)
-        ax1.plot(true_pose[0], true_pose[1], 'go', markersize=8)
-        ax1.arrow(true_pose[0], true_pose[1],
-                  0.2 * math.cos(true_pose[2]), 0.2 * math.sin(true_pose[2]),
-                  head_width=0.05, fc='g')
-        ax1.set_title(f"Ground Truth | Step: {step}")
-        ax1.set_xlim(bounds['min_x'], bounds['max_x'])
-        ax1.set_ylim(bounds['min_y'], bounds['max_y'])
-        ax1.grid(True, linestyle='--', alpha=0.3)
+        if step % RENDER_SKIP == 0:
+            # D. GROUND TRUTH WINDOW
+            ax1.clear()
+            for wall in walls:
+                ax1.plot([wall[0], wall[2]], [wall[1], wall[3]], 'k-', linewidth=3)
+            ax1.plot(true_pose[0], true_pose[1], 'go', markersize=8)
+            ax1.arrow(true_pose[0], true_pose[1],
+                      0.2 * math.cos(true_pose[2]), 0.2 * math.sin(true_pose[2]),
+                      head_width=0.05, fc='g')
+            ax1.set_title(f"Ground Truth | Step: {step}")
+            ax1.set_xlim(bounds['min_x'], bounds['max_x'])
+            ax1.set_ylim(bounds['min_y'], bounds['max_y'])
+            ax1.grid(True, linestyle='--', alpha=0.3)
 
-        # E. SLAM BELIEF WINDOW
-        ax2.clear()
-        prob_grid = mapper.get_probabilities()
-        ax2.imshow(prob_grid.T, cmap=cmap, origin='lower',
-                   extent=[bounds['min_x'], bounds['max_x'],
-                           bounds['min_y'], bounds['max_y']],
-                   vmin=0, vmax=1)
+            # E. SLAM BELIEF WINDOW
+            ax2.clear()
+            prob_grid = mapper.get_probabilities()
+            ax2.imshow(prob_grid.T, cmap=cmap, origin='lower',
+                       extent=[bounds['min_x'], bounds['max_x'],
+                               bounds['min_y'], bounds['max_y']],
+                       vmin=0, vmax=1)
 
-        frontier_mask = get_naive_frontier_mask(mapper)
-        overlay = np.zeros((frontier_mask.shape[0], frontier_mask.shape[1], 4))
-        overlay[frontier_mask] = [1, 0, 1, 0.6]
-        ax2.imshow(overlay.swapaxes(0, 1), origin='lower',
-                   extent=[bounds['min_x'], bounds['max_x'],
-                           bounds['min_y'], bounds['max_y']])
+            frontier_mask = get_naive_frontier_mask(mapper)
+            overlay = np.zeros((frontier_mask.shape[0], frontier_mask.shape[1], 4))
+            overlay[frontier_mask] = [1, 0, 1, 0.6]
+            ax2.imshow(overlay.swapaxes(0, 1), origin='lower',
+                       extent=[bounds['min_x'], bounds['max_x'],
+                               bounds['min_y'], bounds['max_y']])
 
-        ax2.plot(ekf_history_x, ekf_history_y, 'b--', linewidth=1, alpha=0.5)
-        ax2.plot(ekf.mu[0], ekf.mu[1], 'ro', markersize=6)
-        ax2.arrow(ekf.mu[0], ekf.mu[1],
-                  0.2 * math.cos(ekf.mu[2]), 0.2 * math.sin(ekf.mu[2]),
-                  head_width=0.05, fc='r', ec='r')
+            ax2.plot(ekf_history_x, ekf_history_y, 'b--', linewidth=1, alpha=0.5)
+            ax2.plot(ekf.mu[0], ekf.mu[1], 'ro', markersize=6)
+            ax2.arrow(ekf.mu[0], ekf.mu[1],
+                      0.2 * math.cos(ekf.mu[2]), 0.2 * math.sin(ekf.mu[2]),
+                      head_width=0.05, fc='r', ec='r')
 
-        if ai_controller.current_path:
-            px = [p[0] for p in ai_controller.current_path]
-            py = [p[1] for p in ai_controller.current_path]
-            ax2.plot(px, py, 'c-', linewidth=2)
+            if ai_controller.current_path:
+                px = [p[0] for p in ai_controller.current_path]
+                py = [p[1] for p in ai_controller.current_path]
+                ax2.plot(px, py, 'c-', linewidth=2)
 
-        if ai_controller.target_frontier:
-            ax2.plot(ai_controller.target_frontier[0],
-                     ai_controller.target_frontier[1],
-                     'm*', markersize=12)
+            if ai_controller.target_frontier:
+                ax2.plot(ai_controller.target_frontier[0],
+                         ai_controller.target_frontier[1],
+                         'm*', markersize=12)
 
-        ax2.set_title("Active SLAM Belief | Magenta = Frontier")
-        ax2.set_xlim(bounds['min_x'], bounds['max_x'])
-        ax2.set_ylim(bounds['min_y'], bounds['max_y'])
+            ax2.set_title("Active SLAM Belief | Magenta = Frontier")
+            ax2.set_xlim(bounds['min_x'], bounds['max_x'])
+            ax2.set_ylim(bounds['min_y'], bounds['max_y'])
 
-        plt.pause(0.01)
+            plt.pause(0.001)
+
         step += 1
 
+    plt.ioff()
+    plt.show()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
