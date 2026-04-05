@@ -10,12 +10,11 @@ import pickle
 import multiprocessing
 from PIL import Image
 from scipy.ndimage import binary_dilation, maximum_filter
-from numba import njit
 
 # ==========================================
-# HYPERPARAMETERS (Tuned for Speed)
+# HYPERPARAMETERS (Restored to Original)
 # ==========================================
-NUM_PARTICLES = 20  # Reduced from 50
+NUM_PARTICLES = 50  
 PF_RESAMPLE_THRESHOLD = NUM_PARTICLES / 2.0
 
 GRID_RESOLUTION = 0.05
@@ -46,43 +45,23 @@ PROB_UNKNOWN_LOW  = 0.45
 PROB_UNKNOWN_HIGH = 0.55
 PROB_WALL_THRESH  = 0.10
 
-SLAM_SKIP   = 10    # Increased from 5 to reduce heavy map updates
-MAX_STEPS   = 5000  # Safeguard for headless execution
+SLAM_SKIP   = 5   
+MAX_STEPS   = 10000  # Doubled as requested
 
 # ==========================================
-# UTILITIES & JIT COMPILED FUNCTIONS
+# UTILITIES
 # ==========================================
 
-@njit
-def bresenham_line_fast(x0, y0, x1, y1):
-    points = []
-    dx = abs(x1 - x0)
-    dy = abs(y1 - y0)
-    x, y = x0, y0
-    sx = -1 if x0 > x1 else 1
-    sy = -1 if y0 > y1 else 1
-    
-    if dx > dy:
-        err = dx / 2.0
-        while x != x1:
-            points.append((x, y))
-            err -= dy
-            if err < 0:
-                y += sy
-                err += dx
-            x += sx
-    else:
-        err = dy / 2.0
-        while y != y1:
-            points.append((x, y))
-            err -= dx
-            if err < 0:
-                x += sx
-                err += dy
-            y += sy
-            
-    points.append((x, y))
-    return points
+def get_naive_frontier_mask(prob_grid):
+    is_free    = prob_grid > PROB_FREE_THRESH
+    is_unknown = ((prob_grid >= PROB_UNKNOWN_LOW) & (prob_grid <= PROB_UNKNOWN_HIGH))
+    is_wall    = prob_grid < 0.45
+    has_unknown_neighbor = (
+        np.roll(is_unknown, 1, axis=0) | np.roll(is_unknown, -1, axis=0) |
+        np.roll(is_unknown, 1, axis=1) | np.roll(is_unknown, -1, axis=1)
+    )
+    wall_buffer = binary_dilation(is_wall, iterations=4)
+    return is_free & has_unknown_neighbor & ~wall_buffer
 
 def angle_wrap(angle):
     return (angle + math.pi) % (2 * math.pi) - math.pi
@@ -151,8 +130,32 @@ class FastSLAM:
     def grid_to_world(self, gx, gy):
         return ((gx * GRID_RESOLUTION) + self.offset_x, (gy * GRID_RESOLUTION) + self.offset_y)
 
+    def bresenham_line(self, x0, y0, x1, y1):
+        points = []
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        x, y   = x0, y0
+        sx = -1 if x0 > x1 else 1
+        sy = -1 if y0 > y1 else 1
+        if dx > dy:
+            err = dx / 2.0
+            while x != x1:
+                points.append((x, y))
+                err -= dy
+                if err < 0: y += sy; err += dx
+                x += sx
+        else:
+            err = dy / 2.0
+            while y != y1:
+                points.append((x, y))
+                err -= dx
+                if err < 0: x += sx; err += dy
+                y += sy
+        points.append((x, y))
+        return points
+
     def predict(self, v_phys, delta_phys, dt):
         self.dist_since_resample += abs(v_phys) * dt
+        
         w = (v_phys * math.tan(delta_phys)) / L if L > 0 else 0.0
         self.rot_since_resample += abs(w) * dt
         
@@ -164,6 +167,7 @@ class FastSLAM:
     def update(self, angles, distances, max_range=5.0):
         slam_angles = angles[::4]
         slam_distances = distances[::4]
+        
         weight_sum = 0.0
         
         search_offsets = [
@@ -179,6 +183,7 @@ class FastSLAM:
         for p in self.particles:
             best_score = -999999.0
             best_pose = p.pose
+            
             prob_grid = 1.0 / (1.0 + np.exp(-p.grid))
             
             for dx, dy, dtheta in search_offsets:
@@ -209,7 +214,8 @@ class FastSLAM:
                         score += (val - 0.5) * 10.0
                         valid_hits += 1
                 
-                if valid_hits < 5 and dx != 0.0: continue
+                if valid_hits < 5 and dx != 0.0:
+                    continue
                             
                 if score > best_score:
                     best_score = score
@@ -258,8 +264,7 @@ class FastSLAM:
                 end_y = ry + dist * math.sin(glob_angle)
                 gx1, gy1 = self.world_to_grid(end_x, end_y)
                 
-                # Using the Numba JIT compiled function
-                cells = bresenham_line_fast(gx0, gy0, gx1, gy1)
+                cells = self.bresenham_line(gx0, gy0, gx1, gy1)
                 for j, (cx, cy) in enumerate(cells):
                     if 0 <= cx < self.W and 0 <= cy < self.H:
                         if j == len(cells) - 1 and dist < (max_range - 0.1):
@@ -492,7 +497,7 @@ class ActiveSLAMController:
 # ==========================================
 
 def simulate_lidar_scan(robot_x, robot_y, robot_theta, walls):
-    num_rays  = 90  # Reduced from 180 for 2x raycasting speed
+    num_rays  = 180  # Restored to 180
     max_range = 5.0; sigma_z = math.sqrt(VAR_LIDAR)
     angles = np.linspace(0, 2 * math.pi, num_rays, endpoint=False)
     glob_angles = robot_theta + angles
@@ -534,7 +539,6 @@ def load_map(map_name):
         print(f"Error: Map '{map_name}' not found.")
         exit(1)
 
-
 def run_sim(map_name, episode_idx):
     walls, start_pose, bounds = load_map(map_name)
     delta_t   = 0.1
@@ -561,8 +565,9 @@ def run_sim(map_name, episode_idx):
         best_pose = slam.best_particle.pose
         v_cmd, alpha_cmd = ai_controller.update(best_pose, angles, distances)
         
+        # Stops when frontiers are finished
         if v_cmd is None:
-            print(f"Episode {episode_idx} complete at step {step}!")
+            print(f"Episode {episode_idx} complete at step {step} (Frontiers Exhausted)!")
             break 
 
         # Log Data
@@ -622,11 +627,10 @@ def run_sim(map_name, episode_idx):
     with open(data_save_path, 'wb') as f:
         pickle.dump(episode_data, f)
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--map', type=str, default='simple')
-    parser.add_argument('--episodes', type=int, default=1, help='Number of episodes to run')
+    parser.add_argument('--episode', type=int, default=1, dest='episodes', help='Number of episodes to run')
     args = parser.parse_args()
     
     # Create required directories if they don't exist
@@ -639,12 +643,15 @@ if __name__ == '__main__':
     
     # Run episodes in parallel using available CPU cores (leaving 1 free for OS)
     num_cores = max(1, multiprocessing.cpu_count() - 1)
-    print(f"Spinning up {num_cores} parallel workers...")
+    
+    # Ensure we don't spin up more workers than requested episodes
+    workers = min(num_cores, args.episodes)
+    print(f"Spinning up {workers} parallel workers...")
     
     # Package the arguments for starmap
     tasks = [(args.map, ep) for ep in range(args.episodes)]
     
-    with multiprocessing.Pool(processes=num_cores) as pool:
+    with multiprocessing.Pool(processes=workers) as pool:
         pool.starmap(run_sim, tasks)
         
     print("\n=======================================================")
