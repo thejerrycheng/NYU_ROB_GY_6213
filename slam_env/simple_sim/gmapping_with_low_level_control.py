@@ -197,9 +197,6 @@ class FastSLAM:
                 ])
                 
                 score = 0.0
-                
-                # FIX: Gaussian Odometry Penalty
-                # Smoothly penalizes test poses that stray too far from the wheel odometry
                 spatial_penalty = (math.hypot(dx, dy) * 40.0) + (abs(dtheta) * 20.0)
                 score -= spatial_penalty
                 
@@ -216,14 +213,10 @@ class FastSLAM:
                     gx, gy = self.world_to_grid(end_x, end_y)
                     
                     if 0 <= gx < self.W and 0 <= gy < self.H:
-                        # FIX: Continuous Likelihood Scoring
-                        # Maps [0.0 to 1.0] probability to [-5.0 to +5.0] score
                         val = prob_grid[gx, gy]
                         score += (val - 0.5) * 10.0
                         valid_hits += 1
                 
-                # FIX: Trust Threshold
-                # If we didn't hit enough known map cells, don't trust the score
                 if valid_hits < 5 and dx != 0.0:
                     continue
                             
@@ -242,9 +235,7 @@ class FastSLAM:
 
         # --- B. ADAPTIVE RESAMPLING ---
         n_eff = 1.0 / sum([p.weight**2 for p in self.particles])
-        
-        # FIX: Only allow resampling if the robot has actually moved!
-        # Prevents particle depletion in straight hallways or when standing still.
+
         if n_eff < PF_RESAMPLE_THRESHOLD and (self.dist_since_resample > 0.3 or self.rot_since_resample > 0.3):
             new_particles = []
             r = random.uniform(0, 1.0 / NUM_PARTICLES)
@@ -262,7 +253,6 @@ class FastSLAM:
                 
             self.particles = new_particles
             
-            # Reset adaptive counters
             self.dist_since_resample = 0.0
             self.rot_since_resample = 0.0
 
@@ -559,7 +549,7 @@ def load_map(map_name):
         all_x = [w[0] for w in walls] + [w[2] for w in walls]
         all_y = [w[1] for w in walls] + [w[3] for w in walls]
         bounds = {
-            'min_x': min(all_x) - 1.5, 'max_x': max(all_x) + 1.5,
+            'min_x': min(all_x) - 1.5, 'max_x': max(all_x) + 1.5,.py
             'min_y': min(all_y) - 1.5, 'max_y': max(all_y) + 1.5,
         }
         return walls, start_pose, bounds
