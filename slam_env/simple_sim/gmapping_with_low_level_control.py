@@ -549,7 +549,7 @@ def load_map(map_name):
         all_x = [w[0] for w in walls] + [w[2] for w in walls]
         all_y = [w[1] for w in walls] + [w[3] for w in walls]
         bounds = {
-            'min_x': min(all_x) - 1.5, 'max_x': max(all_x) + 1.5,.py
+            'min_x': min(all_x) - 1.5, 'max_x': max(all_x) + 1.5,
             'min_y': min(all_y) - 1.5, 'max_y': max(all_y) + 1.5,
         }
         return walls, start_pose, bounds
